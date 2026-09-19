@@ -13,6 +13,7 @@ Precedence: project > user > plugin. On collision the higher-precedence
 entry wins, and the shadowed one is logged at debug.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,18 +59,34 @@ def _iter_skill_files(project_dir: Path) -> Iterable[Tuple[Path, str]]:
         for p in user_skills.glob("*/SKILL.md"):
             yield p, "user"
 
-    # Plugin skills: ~/.claude/plugins/marketplaces/<m>/{plugins,external_plugins}/<p>/skills/<s>/SKILL.md
-    marketplaces = Path.home() / ".claude" / "plugins" / "marketplaces"
-    if marketplaces.is_dir():
-        for marketplace in marketplaces.iterdir():
-            if not marketplace.is_dir():
-                continue
-            for plugin_root in ("plugins", "external_plugins"):
-                root = marketplace / plugin_root
-                if not root.is_dir():
-                    continue
-                for p in root.glob("*/skills/*/SKILL.md"):
-                    yield p, "plugin"
+    # Plugin skills: only installed *and* enabled plugins. Scanning every
+    # marketplace entry would surface hundreds of skills from plugins that are
+    # not installed and overflow Telegram's 100-command menu limit.
+    for plugin_dir in _enabled_plugin_dirs():
+        for p in plugin_dir.glob("skills/*/SKILL.md"):
+            yield p, "plugin"
+
+
+def _enabled_plugin_dirs() -> Iterable[Path]:
+    """Install paths of plugins listed in installed_plugins.json and enabled in settings."""
+    claude_dir = Path.home() / ".claude"
+    try:
+        installed = json.loads((claude_dir / "plugins" / "installed_plugins.json").read_text())
+    except (OSError, ValueError):
+        return
+    enabled: Dict[str, bool] = {}
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            enabled.update(json.loads((claude_dir / name).read_text()).get("enabledPlugins") or {})
+        except (OSError, ValueError):
+            continue
+    for plugin_id, entries in (installed.get("plugins") or {}).items():
+        if not enabled.get(plugin_id):
+            continue
+        for entry in entries or []:
+            path = Path(entry.get("installPath") or "")
+            if path.is_dir():
+                yield path
 
 
 def discover_skills(project_dir: Path) -> Dict[str, DiscoveredSkill]:

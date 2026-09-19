@@ -155,8 +155,9 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
     assert len(cb_handlers) == 3
 
 
-async def test_agentic_bot_commands(agentic_settings, deps):
+async def test_agentic_bot_commands(agentic_settings, deps, tmp_path, monkeypatch):
     """Agentic mode returns 6 bot commands."""
+    monkeypatch.setenv("HOME", str(tmp_path))
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 

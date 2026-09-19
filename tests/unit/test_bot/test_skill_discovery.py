@@ -27,6 +27,20 @@ def _write_skill(
     )
 
 
+def _install_plugin(home, plugin_id, install_path, enabled=True):
+    """Register a plugin in installed_plugins.json and (optionally) enable it."""
+    import json as _json
+    plugins_json = home / ".claude/plugins/installed_plugins.json"
+    plugins_json.parent.mkdir(parents=True, exist_ok=True)
+    data = _json.loads(plugins_json.read_text()) if plugins_json.exists() else {"version": 2, "plugins": {}}
+    data["plugins"][plugin_id] = [{"scope": "user", "installPath": str(install_path)}]
+    plugins_json.write_text(_json.dumps(data))
+    settings = home / ".claude/settings.json"
+    cfg = _json.loads(settings.read_text()) if settings.exists() else {}
+    cfg.setdefault("enabledPlugins", {})[plugin_id] = enabled
+    settings.write_text(_json.dumps(cfg))
+
+
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
     """Point Path.home() at a tmp dir so tests don't touch the real ~/.claude/."""
@@ -81,30 +95,38 @@ class TestDiscoverSkills:
 
     def test_discovers_plugin_skills(self, fake_project, fake_home):
         _write_skill(
-            fake_home / ".claude/plugins/marketplaces/mp1/plugins/p1/skills/plug",
+            fake_home / ".claude/plugins/cache/mp1/p1/1.0/skills/plug",
             name="plug",
             description="Plugin skill",
         )
+        _install_plugin(fake_home, "p1@mp1", fake_home / ".claude/plugins/cache/mp1/p1/1.0")
         result = discover_skills(fake_project)
         assert "plug" in result
         assert result["plug"].source == "plugin"
 
-    def test_discovers_external_plugin_skills(self, fake_project, fake_home):
+    def test_skips_disabled_and_uninstalled_plugin_skills(self, fake_project, fake_home):
         _write_skill(
             fake_home / ".claude/plugins/marketplaces/mp1/external_plugins/ep1/skills/ext",
             name="ext",
-            description="External plugin skill",
+            description="Uninstalled marketplace plugin skill",
         )
+        _write_skill(
+            fake_home / ".claude/plugins/cache/mp1/off/1.0/skills/off",
+            name="off",
+            description="Installed but disabled",
+        )
+        _install_plugin(fake_home, "off@mp1", fake_home / ".claude/plugins/cache/mp1/off/1.0", enabled=False)
         result = discover_skills(fake_project)
-        assert "ext" in result
-        assert result["ext"].source == "plugin"
+        assert "ext" not in result
+        assert "off" not in result
 
     def test_project_shadows_plugin_on_collision(self, fake_project, fake_home):
         _write_skill(
-            fake_home / ".claude/plugins/marketplaces/mp/plugins/p/skills/shared",
+            fake_home / ".claude/plugins/cache/mp/p/1.0/skills/shared",
             name="shared",
             description="Plugin version",
         )
+        _install_plugin(fake_home, "p@mp", fake_home / ".claude/plugins/cache/mp/p/1.0")
         _write_skill(
             fake_project / ".claude/skills/shared",
             name="shared",
@@ -116,10 +138,11 @@ class TestDiscoverSkills:
 
     def test_user_shadows_plugin_on_collision(self, fake_project, fake_home):
         _write_skill(
-            fake_home / ".claude/plugins/marketplaces/mp/plugins/p/skills/shared",
+            fake_home / ".claude/plugins/cache/mp/p/1.0/skills/shared",
             name="shared",
             description="Plugin version",
         )
+        _install_plugin(fake_home, "p@mp", fake_home / ".claude/plugins/cache/mp/p/1.0")
         _write_skill(
             fake_home / ".claude/skills/shared",
             name="shared",
