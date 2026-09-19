@@ -90,8 +90,12 @@ def _apply_environment_overrides(settings: Settings, env: Optional[str]) -> Sett
     else:
         logger.warning("Unknown environment, using default settings", environment=env)
 
-    # Apply overrides
+    # Apply overrides, but never over a value the operator set explicitly:
+    # the environment profile only supplies defaults.
+    explicit = set(getattr(settings, "model_fields_set", set()))
     for key, value in overrides.items():
+        if key in explicit or key.upper() in os.environ:
+            continue
         if hasattr(settings, key):
             setattr(settings, key, value)
             logger.debug(

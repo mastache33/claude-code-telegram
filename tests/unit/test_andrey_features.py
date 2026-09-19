@@ -145,3 +145,16 @@ async def test_voice_reply_modes(monkeypatch, mode, from_voice, should_speak):
     if should_speak:
         assert spoken[0] == "Привет, всё готово"
         update.message.reply_voice.assert_awaited_once()
+
+
+def test_environment_profile_does_not_override_explicit_env(monkeypatch):
+    from src.config.loader import _apply_environment_overrides
+    from src.config.settings import Settings
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:x")
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "b")
+    monkeypatch.setenv("APPROVED_DIRECTORY", "/tmp")
+    monkeypatch.setenv("CLAUDE_MAX_COST_PER_USER", "1000000")
+    settings = _apply_environment_overrides(Settings(), "production")
+    assert settings.claude_max_cost_per_user == 1000000
+    assert settings.rate_limit_requests == 5  # not set explicitly -> profile default applies
