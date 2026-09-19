@@ -31,6 +31,7 @@ from telegram.ext import (
     filters,
 )
 
+from ..claude.run_context import current_model, current_question_callback
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
@@ -45,6 +46,7 @@ from .utils.file_extractor import (
     FileAttachment,
     validate_file_path,
 )
+from .utils import pending_input
 from .utils.html_format import escape_html
 from .utils.image_extractor import (
     ImageAttachment,
@@ -157,6 +159,26 @@ class PendingToolApproval:
     future: "asyncio.Future[bool]"
 
 
+@dataclass
+class PendingQuestion:
+    """One AskUserQuestion prompt waiting for a button tap."""
+
+    user_id: int
+    labels: List[str]
+    multi: bool
+    future: "asyncio.Future[Optional[str]]"
+    selected: List[int] = field(default_factory=list)
+
+
+MODEL_ALIASES = {
+    "opus": "opus",
+    "sonnet": "sonnet",
+    "haiku": "haiku",
+    "fable": "fable",
+}
+QUESTION_TIMEOUT_SECONDS = 30 * 60
+
+
 class MessageOrchestrator:
     """Routes messages based on mode. Single entry point for all Telegram updates."""
 
@@ -165,6 +187,7 @@ class MessageOrchestrator:
         self.deps = deps
         self._active_requests: Dict[int, ActiveRequest] = {}
         self._pending_tool_approvals: Dict[str, PendingToolApproval] = {}
+        self._pending_questions: Dict[str, PendingQuestion] = {}
         self._known_commands: frozenset[str] = frozenset()
         self._skills: Dict[str, DiscoveredSkill] = discover_skills(
             settings.approved_directory
@@ -193,6 +216,7 @@ class MessageOrchestrator:
         """Wrap handler to inject dependencies into context.bot_data."""
 
         async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            self._bind_run_context(update, context)
             for key, value in self.deps.items():
                 context.bot_data[key] = value
             context.bot_data["settings"] = self.settings
@@ -379,6 +403,8 @@ class MessageOrchestrator:
             ("new", self.agentic_new),
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
+            ("model", self.agentic_model),
+            ("voice", self.agentic_voice_mode),
             ("repo", self.agentic_repo),
             ("restart", command.restart_command),
         ]
@@ -449,6 +475,14 @@ class MessageOrchestrator:
             )
         )
 
+        # Answers to Claude's clarifying questions (AskUserQuestion)
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._handle_question_callback),
+                pattern=r"^askq:",
+            )
+        )
+
         # Only cd: callbacks (for project selection), scoped by pattern
         app.add_handler(
             CallbackQueryHandler(
@@ -516,12 +550,14 @@ class MessageOrchestrator:
         """Return bot commands appropriate for current mode."""
         if self.settings.agentic_mode:
             commands = [
-                BotCommand("start", "Start the bot"),
-                BotCommand("new", "Start a fresh session"),
-                BotCommand("status", "Show session status"),
-                BotCommand("verbose", "Set output verbosity (0/1/2)"),
-                BotCommand("repo", "List repos / switch workspace"),
-                BotCommand("restart", "Restart the bot"),
+                BotCommand("start", "Начало и помощь"),
+                BotCommand("new", "Новая сессия (сбросить контекст)"),
+                BotCommand("status", "Статус сессии"),
+                BotCommand("model", "Модель: opus / sonnet / haiku"),
+                BotCommand("voice", "Голосовые ответы: auto / on / off"),
+                BotCommand("verbose", "Подробность вывода (0/1/2)"),
+                BotCommand("repo", "Выбрать проект"),
+                BotCommand("restart", "Перезапустить бота"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -1169,6 +1205,10 @@ class MessageOrchestrator:
         buffer and are processed immediately.
         """
         user_id = update.effective_user.id
+        if pending_input.is_waiting(user_id) and update.message.text:
+            pending_input.resolve(user_id, update.message.text)
+            await update.message.reply_text("✍️ Ответ передан Claude.")
+            return
         # Include reply/quote context so Claude sees the fragment the user is
         # responding to, not just their new text.
         message_text = build_user_prompt(update.message)
@@ -1510,6 +1550,9 @@ class MessageOrchestrator:
                 )
             except Exception as file_err:
                 logger.warning("Document send failed", error=str(file_err))
+
+        if success:
+            await self._maybe_send_voice_reply(update, context, claude_response.content, from_voice=False)
 
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
@@ -2013,6 +2056,11 @@ class MessageOrchestrator:
             except Exception as file_err:
                 logger.warning("Document send failed", error=str(file_err))
 
+        if claude_response is not None and getattr(claude_response, "content", None):
+            await self._maybe_send_voice_reply(
+                update, context, claude_response.content, from_voice=update.message.voice is not None
+            )
+
     async def _handle_unknown_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -2182,6 +2230,247 @@ class MessageOrchestrator:
             await active.progress_msg.edit_text("Stopping...", reply_markup=None)
         except Exception:
             pass
+
+
+    # --- Voice replies (OpenAI TTS) -----------------------------------------
+
+    async def agentic_voice_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/voice [auto|on|off] — when to answer with a voice message."""
+        args = update.message.text.split()[1:] if update.message.text else []
+        modes = {"auto": "на голосовые — голосом", "on": "всегда голосом", "off": "только текст"}
+        if not args or args[0].lower() not in modes:
+            current = context.user_data.get("voice_reply", "auto")
+            await update.message.reply_text(
+                f"Голосовые ответы: <b>{current}</b> ({modes.get(current, '')})\n\n"
+                "<code>/voice auto</code> — на голосовое отвечаю голосом\n"
+                "<code>/voice on</code> — всегда\n<code>/voice off</code> — никогда",
+                parse_mode="HTML",
+            )
+            return
+        mode = args[0].lower()
+        context.user_data["voice_reply"] = mode
+        await update.message.reply_text(f"Голосовые ответы: {modes[mode]}.")
+
+    async def _maybe_send_voice_reply(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, from_voice: bool
+    ) -> None:
+        mode = context.user_data.get("voice_reply", "auto")
+        if mode == "off" or (mode == "auto" and not from_voice) or not text or not text.strip():
+            return
+        api_key = self.settings.openai_api_key
+        if api_key is None:
+            return
+        spoken = re.sub(r"```.*?```", " (код в тексте) ", text, flags=re.S)
+        spoken = re.sub(r"[*_`#>|]", "", spoken)
+        spoken = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", spoken).strip()[:3500]
+        if not spoken:
+            return
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=api_key.get_secret_value())
+            speech = await client.audio.speech.create(
+                model="gpt-4o-mini-tts",
+                voice="onyx",
+                input=spoken,
+                response_format="opus",
+                instructions="Говори по-русски, спокойно и дружелюбно, в среднем темпе.",
+            )
+            await update.message.reply_voice(voice=speech.content)
+        except Exception as e:
+            logger.warning("Voice reply failed", error=str(e))
+
+    # --- Per-request context: model choice and clarifying questions ---------
+
+    def _bind_run_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Expose the user's model and a question callback to the SDK layer."""
+        user_data = context.user_data if context.user_data is not None else {}
+        current_model.set(user_data.get("model"))
+        chat = update.effective_chat
+        user = update.effective_user
+        if chat is None or user is None:
+            current_question_callback.set(None)
+            return
+        message = update.effective_message
+        current_question_callback.set(
+            self._make_question_callback(
+                user_id=user.id,
+                chat_id=chat.id,
+                bot=context.bot,
+                message_thread_id=message.message_thread_id if message else None,
+            )
+        )
+
+    async def agentic_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Switch the Claude model for this chat: /model [opus|sonnet|haiku|default]."""
+        args = update.message.text.split()[1:] if update.message.text else []
+        current = context.user_data.get("model") or self.settings.claude_model or "по умолчанию"
+        if not args:
+            await update.message.reply_text(
+                f"Модель: <b>{escape_html(str(current))}</b>\n\n"
+                "<code>/model sonnet</code> — быстро и экономно\n"
+                "<code>/model opus</code> — сложные задачи\n"
+                "<code>/model haiku</code> — самое дешёвое\n"
+                "<code>/model default</code> — как в настройках",
+                parse_mode="HTML",
+            )
+            return
+        choice = args[0].strip().lower()
+        if choice in {"default", "reset", "сброс"}:
+            context.user_data.pop("model", None)
+            await update.message.reply_text("Модель сброшена на значение по умолчанию.")
+            return
+        model = MODEL_ALIASES.get(choice, choice if choice.startswith("claude-") else None)
+        if model is None:
+            await update.message.reply_text("Не знаю такую модель. Варианты: opus, sonnet, haiku, default.")
+            return
+        context.user_data["model"] = model
+        await update.message.reply_text(
+            f"Модель: <b>{escape_html(model)}</b>. Действует со следующего сообщения.",
+            parse_mode="HTML",
+        )
+
+    def _make_question_callback(
+        self,
+        user_id: int,
+        chat_id: int,
+        bot: Any,
+        message_thread_id: Optional[int],
+    ) -> Callable[[Dict[str, Any]], Awaitable[Optional[Dict[str, str]]]]:
+        """Ask Claude's AskUserQuestion questions in Telegram, one by one."""
+
+        async def ask(tool_input: Dict[str, Any]) -> Optional[Dict[str, str]]:
+            answers: Dict[str, str] = {}
+            for question in tool_input.get("questions") or []:
+                text = str(question.get("question") or "").strip()
+                if not text:
+                    continue
+                answer = await self._ask_one_question(
+                    question, user_id, chat_id, bot, message_thread_id
+                )
+                if answer is None:
+                    return None
+                answers[text] = answer
+            return answers or None
+
+        return ask
+
+    async def _ask_one_question(
+        self,
+        question: Dict[str, Any],
+        user_id: int,
+        chat_id: int,
+        bot: Any,
+        message_thread_id: Optional[int],
+    ) -> Optional[str]:
+        options = question.get("options") or []
+        labels = [str(o.get("label", "")).strip() for o in options if o.get("label")]
+        multi = bool(question.get("multiSelect"))
+        request_id = uuid.uuid4().hex[:12]
+        future: "asyncio.Future[Optional[str]]" = asyncio.get_running_loop().create_future()
+        pending = PendingQuestion(user_id=user_id, labels=labels, multi=multi, future=future)
+        self._pending_questions[request_id] = pending
+
+        header = question.get("header")
+        lines = [f"❓ <b>{escape_html(str(header))}</b>" if header else "❓ <b>Вопрос от Claude</b>"]
+        lines.append(escape_html(str(question.get("question", ""))))
+        for i, option in enumerate(options):
+            desc = option.get("description")
+            if desc:
+                lines.append(f"<b>{i + 1}. {escape_html(labels[i])}</b> — {escape_html(str(desc))}")
+        if multi:
+            lines.append("\n<i>Можно выбрать несколько, потом «Готово».</i>")
+        text = "\n".join(lines)
+
+        try:
+            msg = await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=self._question_keyboard(request_id, pending),
+                message_thread_id=message_thread_id,
+            )
+        except Exception:
+            self._pending_questions.pop(request_id, None)
+            raise
+
+        try:
+            answer = await asyncio.wait_for(future, timeout=QUESTION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            answer = None
+        finally:
+            self._pending_questions.pop(request_id, None)
+            pending_input.waiting_text.pop(user_id, None)
+
+        suffix = f"\n\n✅ <b>{escape_html(answer)}</b>" if answer else "\n\n⏱ Без ответа"
+        try:
+            await msg.edit_text(text + suffix, parse_mode="HTML", reply_markup=None)
+        except Exception:
+            pass
+        return answer
+
+    @staticmethod
+    def _question_keyboard(request_id: str, pending: PendingQuestion) -> InlineKeyboardMarkup:
+        rows = []
+        for i, label in enumerate(pending.labels):
+            mark = "✅ " if i in pending.selected else ""
+            rows.append([InlineKeyboardButton(f"{mark}{label}"[:60], callback_data=f"askq:{request_id}:{i}")])
+        extra = [InlineKeyboardButton("✍️ Свой ответ", callback_data=f"askq:{request_id}:free")]
+        if pending.multi:
+            extra.insert(0, InlineKeyboardButton("Готово", callback_data=f"askq:{request_id}:done"))
+        rows.append(extra)
+        return InlineKeyboardMarkup(rows)
+
+    async def _handle_question_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle askq: callbacks — resolve a pending AskUserQuestion prompt."""
+        query = update.callback_query
+        _, request_id, action = query.data.split(":", 2)
+        pending = self._pending_questions.get(request_id)
+        if pending is None or pending.future.done():
+            await query.answer("Уже отвечено.", show_alert=False)
+            return
+        if update.effective_user is None or update.effective_user.id != pending.user_id:
+            await query.answer("Это не твой вопрос.", show_alert=True)
+            return
+
+        if action == "free":
+            loop = asyncio.get_running_loop()
+            text_future: "asyncio.Future[str]" = loop.create_future()
+            pending_input.waiting_text[pending.user_id] = text_future
+            await query.answer()
+            await query.message.reply_text("Напиши ответ следующим сообщением.")
+            text_future.add_done_callback(
+                lambda f: pending.future.done() or pending.future.set_result(f.result())
+            )
+            return
+
+        if action == "done":
+            chosen = [pending.labels[i] for i in pending.selected]
+            if not chosen:
+                await query.answer("Выбери хотя бы один вариант.", show_alert=False)
+                return
+            await query.answer()
+            pending.future.set_result(", ".join(chosen))
+            return
+
+        index = int(action)
+        if pending.multi:
+            if index in pending.selected:
+                pending.selected.remove(index)
+            else:
+                pending.selected.append(index)
+            await query.answer()
+            try:
+                await query.edit_message_reply_markup(self._question_keyboard(request_id, pending))
+            except Exception:
+                pass
+            return
+
+        await query.answer()
+        pending.future.set_result(pending.labels[index])
+
 
     def _make_tool_approval_callback(
         self,

@@ -11,6 +11,8 @@ from typing import Any, Awaitable
 from telegram import Update
 from telegram.ext._baseupdateprocessor import BaseUpdateProcessor
 
+from .utils import pending_input
+
 
 class StopAwareUpdateProcessor(BaseUpdateProcessor):
     """Update processor that lets priority callbacks bypass sequential processing.
@@ -34,7 +36,7 @@ class StopAwareUpdateProcessor(BaseUpdateProcessor):
     concurrently too, or it would deadlock waiting behind itself.
     """
 
-    _PRIORITY_PREFIXES = ("stop:", "tapv:")
+    _PRIORITY_PREFIXES = ("stop:", "tapv:", "askq:")
 
     def __init__(self) -> None:
         # High limit so priority callbacks are never blocked by semaphore
@@ -46,6 +48,15 @@ class StopAwareUpdateProcessor(BaseUpdateProcessor):
         """Return True if the update is a priority callback query."""
         if not isinstance(update, Update):
             return False
+        # A text reply to Claude's question: the asking handler holds the
+        # sequential lock while it waits for exactly this message.
+        if (
+            update.message is not None
+            and update.message.text
+            and update.effective_user is not None
+            and pending_input.is_waiting(update.effective_user.id)
+        ):
+            return True
         cb = update.callback_query
         return (
             cb is not None

@@ -1,0 +1,147 @@
+"""Tests for fork features: AskUserQuestion answers, /model, pending text input."""
+
+import asyncio
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+from src.bot.utils import pending_input
+from src.claude.run_context import current_model
+from src.claude.sdk_integration import _make_can_use_tool_callback
+
+QUESTION_INPUT = {
+    "questions": [
+        {
+            "question": "Which color?",
+            "header": "Color",
+            "multiSelect": False,
+            "options": [{"label": "Red"}, {"label": "Green"}],
+        }
+    ]
+}
+
+
+async def test_ask_user_question_answers_flow_into_updated_input():
+    async def answer(tool_input):
+        return {"Which color?": "Green"}
+
+    cb = _make_can_use_tool_callback(
+        security_validator=None,
+        working_directory=Path("/tmp"),
+        approved_directory=Path("/tmp"),
+        question_callback=answer,
+    )
+    result = await cb("AskUserQuestion", QUESTION_INPUT, MagicMock())
+    assert isinstance(result, PermissionResultAllow)
+    assert result.updated_input["answers"] == {"Which color?": "Green"}
+    assert result.updated_input["questions"] == QUESTION_INPUT["questions"]
+
+
+async def test_unanswered_question_is_denied():
+    async def no_answer(tool_input):
+        return None
+
+    cb = _make_can_use_tool_callback(
+        security_validator=None,
+        working_directory=Path("/tmp"),
+        approved_directory=Path("/tmp"),
+        question_callback=no_answer,
+    )
+    result = await cb("AskUserQuestion", QUESTION_INPUT, MagicMock())
+    assert isinstance(result, PermissionResultDeny)
+
+
+async def test_other_tools_allowed_without_validator():
+    cb = _make_can_use_tool_callback(
+        security_validator=None,
+        working_directory=Path("/tmp"),
+        approved_directory=Path("/tmp"),
+        question_callback=AsyncMock(),
+    )
+    result = await cb("Bash", {"command": "ls"}, MagicMock())
+    assert isinstance(result, PermissionResultAllow)
+
+
+async def test_pending_input_resolves_once():
+    future = asyncio.get_running_loop().create_future()
+    pending_input.waiting_text[42] = future
+    assert pending_input.is_waiting(42)
+    assert pending_input.resolve(42, "my answer")
+    assert await future == "my answer"
+    assert not pending_input.is_waiting(42)
+    assert not pending_input.resolve(42, "again")
+
+
+@pytest.mark.parametrize(
+    "arg,expected",
+    [("sonnet", "sonnet"), ("OPUS", "opus"), ("claude-sonnet-5", "claude-sonnet-5")],
+)
+async def test_model_command_sets_user_model(arg, expected):
+    from src.bot.orchestrator import MessageOrchestrator
+
+    settings = MagicMock()
+    settings.claude_model = None
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = settings
+    update = MagicMock()
+    update.message.text = f"/model {arg}"
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.user_data = {}
+    await orch.agentic_model(update, context)
+    assert context.user_data["model"] == expected
+
+
+async def test_model_command_rejects_unknown():
+    from src.bot.orchestrator import MessageOrchestrator
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(claude_model=None)
+    update = MagicMock()
+    update.message.text = "/model gpt-4o"
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.user_data = {}
+    await orch.agentic_model(update, context)
+    assert "model" not in context.user_data
+
+
+def test_current_model_default_is_none():
+    assert current_model.get() is None
+
+
+@pytest.mark.parametrize(
+    "mode,from_voice,should_speak",
+    [("auto", True, True), ("auto", False, False), ("on", False, True), ("off", True, False)],
+)
+async def test_voice_reply_modes(monkeypatch, mode, from_voice, should_speak):
+    import sys
+    import types
+
+    from src.bot.orchestrator import MessageOrchestrator
+
+    spoken = []
+
+    class FakeSpeech:
+        async def create(self, **kwargs):
+            spoken.append(kwargs["input"])
+            return MagicMock(content=b"ogg")
+
+    fake_openai = types.SimpleNamespace(
+        AsyncOpenAI=lambda api_key: types.SimpleNamespace(audio=types.SimpleNamespace(speech=FakeSpeech()))
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock()
+    update = MagicMock()
+    update.message.reply_voice = AsyncMock()
+    context = MagicMock()
+    context.user_data = {"voice_reply": mode}
+    await orch._maybe_send_voice_reply(update, context, "**Привет**, всё готово", from_voice=from_voice)
+    assert bool(spoken) is should_speak
+    if should_speak:
+        assert spoken[0] == "Привет, всё готово"
+        update.message.reply_voice.assert_awaited_once()

@@ -49,6 +49,8 @@ from .exceptions import (
 )
 from .monitor import _is_claude_internal_path, check_bash_directory_boundary
 
+from .run_context import QuestionCallback, current_model, current_question_callback
+
 logger = structlog.get_logger()
 
 # Fallback message when Claude produces no text but did use tools.
@@ -217,13 +219,15 @@ _FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
 def _make_can_use_tool_callback(
-    security_validator: SecurityValidator,
+    security_validator: Optional[SecurityValidator],
     working_directory: Path,
     approved_directory: Path,
     approval_callback: Optional[
         Callable[[str, Dict[str, Any]], Awaitable[bool]]
     ] = None,
     approval_tool_names: FrozenSet[str] = frozenset(),
+    question_callback: Optional[QuestionCallback] = None,
+    enforce_boundaries: bool = True,
 ) -> Any:
     """Create a can_use_tool callback for SDK-level tool permission validation.
 
@@ -240,6 +244,22 @@ def _make_can_use_tool_callback(
         context: ToolPermissionContext,
     ) -> Any:
         logger.debug("can_use_tool consulted", tool_name=tool_name)
+
+        # Clarifying questions: ask the user in Telegram and hand the answers
+        # back to Claude through the tool input.
+        if tool_name == "AskUserQuestion" and question_callback is not None:
+            answers = await question_callback(tool_input)
+            if not answers:
+                return PermissionResultDeny(
+                    message="The user did not answer in Telegram. Continue with your best judgement."
+                )
+            return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
+
+        if not enforce_boundaries or security_validator is None:
+            if approval_callback is not None and tool_name in approval_tool_names:
+                if not await approval_callback(tool_name, tool_input):
+                    return PermissionResultDeny(message="Denied by user via Telegram")
+            return PermissionResultAllow()
 
         # File path validation
         if tool_name in FILE_TOOLS:
@@ -415,6 +435,12 @@ class ClaudeSDKManager:
             if boundary_checks_active:
                 tools_to_strip = tools_to_strip | GUARDED_TOOLS
 
+            question_cb = current_question_callback.get()
+            if question_cb is not None:
+                # A pre-approved AskUserQuestion never reaches can_use_tool,
+                # so the question would go unanswered.
+                tools_to_strip = tools_to_strip | frozenset({"AskUserQuestion"})
+
             if sdk_allowed_tools is not None and tools_to_strip:
                 gated = [t for t in sdk_allowed_tools if t in tools_to_strip]
                 if gated:
@@ -436,7 +462,7 @@ class ClaudeSDKManager:
             # Build Claude Agent options
             options = ClaudeAgentOptions(
                 max_turns=self.config.claude_max_turns,
-                model=self.config.claude_model or None,
+                model=current_model.get() or self.config.claude_model or None,
                 max_budget_usd=self.config.claude_max_cost_per_request,
                 cwd=str(working_directory),
                 allowed_tools=sdk_allowed_tools,
@@ -455,7 +481,7 @@ class ClaudeSDKManager:
                     "excludedCommands": self.config.sandbox_excluded_commands or [],
                 },
                 system_prompt=base_prompt,
-                setting_sources=["project"],
+                setting_sources=["user", "project", "local"],
                 stderr=_stderr_callback,
             )
 
@@ -468,8 +494,10 @@ class ClaudeSDKManager:
                 )
 
             # Wire can_use_tool callback for preventive tool validation
-            if self.security_validator:
+            if self.security_validator or question_cb is not None:
                 options.can_use_tool = _make_can_use_tool_callback(
+                    question_callback=question_cb,
+                    enforce_boundaries=boundary_checks_active,
                     security_validator=self.security_validator,
                     working_directory=working_directory,
                     approved_directory=self.config.approved_directory,

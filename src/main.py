@@ -44,6 +44,7 @@ def setup_logging(debug: bool = False) -> None:
     level = logging.DEBUG if debug else logging.INFO
 
     # Configure standard logging
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.basicConfig(
         level=level,
         format="%(message)s",
