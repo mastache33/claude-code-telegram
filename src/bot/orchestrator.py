@@ -282,14 +282,13 @@ class MessageOrchestrator:
                 return False
 
         message_thread_id = self._extract_message_thread_id(update)
-        if not message_thread_id:
-            await self._reject_for_thread_mode(
-                update,
-                manager.guidance_message(mode=self.settings.project_threads_mode),
-            )
-            return False
-
-        project = await manager.resolve_project(chat.id, message_thread_id)
+        project = (
+            await manager.resolve_project(chat.id, message_thread_id)
+            if message_thread_id
+            else None
+        )
+        if not project:
+            project = self._default_thread_project(manager)
         if not project:
             await self._reject_for_thread_mode(
                 update,
@@ -297,7 +296,7 @@ class MessageOrchestrator:
             )
             return False
 
-        state_key = f"{chat.id}:{message_thread_id}"
+        state_key = f"{chat.id}:{message_thread_id or 'main'}"
         thread_states = context.user_data.setdefault("thread_state", {})
         state = thread_states.get(state_key, {})
 
@@ -320,6 +319,13 @@ class MessageOrchestrator:
             "project_name": project.name,
         }
         return True
+
+    def _default_thread_project(self, manager: Any) -> Any:
+        """Fallback project for the main chat and unmapped topics (private mode only)."""
+        slug = self.settings.project_threads_default_slug
+        if not slug or self.settings.project_threads_mode != "private":
+            return None
+        return manager.registry.get_by_slug(slug)
 
     def _persist_thread_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Persist compatibility keys back into per-thread state."""

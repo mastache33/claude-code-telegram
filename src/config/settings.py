@@ -401,6 +401,13 @@ class Settings(BaseSettings):
         ),
         ge=0.0,
     )
+    project_threads_default_slug: Optional[str] = Field(
+        None,
+        description=(
+            "Private mode: project for the main chat and for topics not mapped to a "
+            "project (each topic keeps its own session). Unset = reject them (strict)."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"

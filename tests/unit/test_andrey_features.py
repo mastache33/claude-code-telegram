@@ -158,3 +158,45 @@ def test_environment_profile_does_not_override_explicit_env(monkeypatch):
     settings = _apply_environment_overrides(Settings(), "production")
     assert settings.claude_max_cost_per_user == 1000000
     assert settings.rate_limit_requests == 5  # not set explicitly -> profile default applies
+
+
+@pytest.mark.parametrize("thread_id", [None, 777])
+async def test_unmapped_topic_falls_back_to_default_project(tmp_path, thread_id):
+    from src.bot.orchestrator import MessageOrchestrator
+
+    general = MagicMock(slug="general", absolute_path=tmp_path)
+    general.name = "Общее"
+    manager = MagicMock()
+    manager.resolve_project = AsyncMock(return_value=None)
+    manager.registry.get_by_slug = MagicMock(return_value=general)
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(project_threads_mode="private", project_threads_default_slug="general")
+    orch._extract_message_thread_id = MagicMock(return_value=thread_id)
+    update = MagicMock()
+    update.effective_chat.id = 1
+    update.effective_chat.type = "private"
+    context = MagicMock()
+    context.bot_data = {"project_threads_manager": manager}
+    context.user_data = {}
+
+    assert await orch._apply_thread_routing_context(update, context) is True
+    assert context.user_data["current_directory"] == tmp_path
+    assert context.user_data["_thread_context"]["state_key"] == f"1:{thread_id or 'main'}"
+
+
+async def test_unmapped_topic_rejected_without_default():
+    from src.bot.orchestrator import MessageOrchestrator
+
+    manager = MagicMock()
+    manager.resolve_project = AsyncMock(return_value=None)
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(project_threads_mode="private", project_threads_default_slug=None)
+    orch._extract_message_thread_id = MagicMock(return_value=5)
+    orch._reject_for_thread_mode = AsyncMock()
+    update = MagicMock()
+    update.effective_chat.type = "private"
+    context = MagicMock()
+    context.bot_data = {"project_threads_manager": manager}
+    context.user_data = {}
+    assert await orch._apply_thread_routing_context(update, context) is False
