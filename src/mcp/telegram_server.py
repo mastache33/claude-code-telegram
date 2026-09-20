@@ -56,6 +56,29 @@ async def send_file_to_user(file_path: str, caption: str = "") -> str:
 
 
 @mcp.tool()
+async def create_topic(name: str, project: str = "") -> str:
+    """Create a new topic (separate chat) in the user's private chat with the bot.
+
+    Use when the user asks for a new chat/topic: "заведи тему под ремонт",
+    "сделай отдельный чат для Gavan". Topics are never created automatically —
+    only on request.
+
+    Args:
+        name: Short topic title, up to 60 characters.
+        project: Optional project slug to bind the topic to; empty = general workspace.
+
+    Returns:
+        Confirmation string when the topic is queued for creation.
+    """
+    clean = name.strip()
+    if not clean:
+        return "Error: name is empty"
+    if len(clean) > 60:
+        return f"Error: name too long ({len(clean)} chars), keep it under 60"
+    return f"Topic queued: {clean}" + (f" (project {project})" if project else "")
+
+
+@mcp.tool()
 async def configure_bot(
     model: str = "",
     voice: str = "",

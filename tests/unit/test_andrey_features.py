@@ -393,3 +393,23 @@ async def test_configure_bot_tool_call_collected():
     await cb(StreamUpdate(type="tool_calls", tool_calls=[
         {"name": "mcp__telegram__configure_bot", "input": {"model": "sonnet"}}]))
     assert collected == [{"model": "sonnet"}]
+
+
+async def test_create_topic_tool_creates_and_maps():
+    from src.bot.orchestrator import MessageOrchestrator
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    manager = MagicMock()
+    manager.repository.upsert_mapping = AsyncMock()
+    update = MagicMock()
+    update.effective_chat.id = 5
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.bot_data = {"project_threads_manager": manager}
+    context.bot.create_forum_topic = AsyncMock(return_value=MagicMock(message_thread_id=321))
+
+    await orch._create_topics(update, context, [{"name": "Ремонт кухни"}, {"name": "Gavan", "project": "gavan"}])
+    assert context.bot.create_forum_topic.await_count == 2
+    manager.repository.upsert_mapping.assert_awaited_once()
+    assert manager.repository.upsert_mapping.await_args.kwargs["project_slug"] == "gavan"
+    assert "Ремонт кухни" in update.message.reply_text.await_args_list[0].args[0]

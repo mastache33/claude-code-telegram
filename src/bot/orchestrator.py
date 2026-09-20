@@ -922,6 +922,7 @@ class MessageOrchestrator:
         mcp_voice: Optional[List[str]] = None,
         mcp_checklists: Optional[List[Any]] = None,
         mcp_config: Optional[List[Dict[str, Any]]] = None,
+        mcp_topics: Optional[List[Dict[str, Any]]] = None,
         approved_directory: Optional[Path] = None,
         draft_streamer: Optional[DraftStreamer] = None,
         interrupt_event: Optional[asyncio.Event] = None,
@@ -947,7 +948,7 @@ class MessageOrchestrator:
         need_mcp_intercept = (
             (mcp_images is not None or mcp_files is not None)
             and approved_directory is not None
-        ) or mcp_voice is not None or mcp_checklists is not None or mcp_config is not None
+        ) or mcp_voice is not None or mcp_checklists is not None or mcp_config is not None or mcp_topics is not None
 
         if verbose_level == 0 and not need_mcp_intercept and draft_streamer is None:
             return None
@@ -968,7 +969,13 @@ class MessageOrchestrator:
                     tc_input = tc.get("input", {})
                     file_path = tc_input.get("file_path", "")
                     caption = tc_input.get("caption", "")
-                    if mcp_config is not None and (
+                    if mcp_topics is not None and (
+                        tc_name == "create_topic"
+                        or tc_name.endswith("__create_topic")
+                    ):
+                        if str(tc_input.get("name", "")).strip():
+                            mcp_topics.append(dict(tc_input))
+                    elif mcp_config is not None and (
                         tc_name == "configure_bot"
                         or tc_name.endswith("__configure_bot")
                     ):
@@ -1418,6 +1425,7 @@ class MessageOrchestrator:
         mcp_voice: List[str] = []
         mcp_checklists: List[Any] = []
         mcp_config: List[Dict[str, Any]] = []
+        mcp_topics: List[Dict[str, Any]] = []
         mcp_rejected_files: List[str] = []
 
         # Stream drafts (private chats only)
@@ -1443,6 +1451,7 @@ class MessageOrchestrator:
             mcp_voice=mcp_voice,
             mcp_checklists=mcp_checklists,
             mcp_config=mcp_config,
+            mcp_topics=mcp_topics,
             approved_directory=self.settings.approved_directory,
             draft_streamer=draft_streamer,
             interrupt_event=interrupt_event,
@@ -1631,6 +1640,7 @@ class MessageOrchestrator:
 
         if success:
             await self._apply_bot_config(update, context, mcp_config)
+            await self._create_topics(update, context, mcp_topics)
             await self._send_checklists(update, mcp_checklists)
             await self._maybe_send_voice_reply(
                 update, context, claude_response.content, from_voice=False, requested=mcp_voice
@@ -2080,6 +2090,7 @@ class MessageOrchestrator:
         mcp_voice_media: List[str] = []
         mcp_checklists_media: List[Any] = []
         mcp_config_media: List[Dict[str, Any]] = []
+        mcp_topics_media: List[Dict[str, Any]] = []
         mcp_rejected_files_media: List[str] = []
         on_stream = self._make_stream_callback(
             verbose_level,
@@ -2091,6 +2102,7 @@ class MessageOrchestrator:
             mcp_voice=mcp_voice_media,
             mcp_checklists=mcp_checklists_media,
             mcp_config=mcp_config_media,
+            mcp_topics=mcp_topics_media,
             mcp_rejected_files=mcp_rejected_files_media,
             approved_directory=self.settings.approved_directory,
         )
@@ -2184,6 +2196,7 @@ class MessageOrchestrator:
 
         if claude_response is not None and getattr(claude_response, "content", None):
             await self._apply_bot_config(update, context, mcp_config_media)
+            await self._create_topics(update, context, mcp_topics_media)
             await self._send_checklists(update, mcp_checklists_media)
             await self._maybe_send_voice_reply(
                 update, context, claude_response.content,
@@ -2438,6 +2451,44 @@ class MessageOrchestrator:
             if d.is_dir() and project.lower() in d.name.lower()
         ] if (base / "Developer").is_dir() else []
         return matches[0] if len(matches) == 1 else None
+
+
+    async def _create_topics(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        requests: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        """Create topics the user asked for (``create_topic`` tool calls)."""
+        chat = update.effective_chat
+        if not requests or chat is None:
+            return
+        manager = context.bot_data.get("project_threads_manager")
+        for req in requests:
+            name = str(req.get("name", "")).strip()[:60]
+            slug = str(req.get("project", "")).strip().lower()
+            if not name:
+                continue
+            try:
+                topic = await context.bot.create_forum_topic(chat_id=chat.id, name=name)
+            except Exception as e:
+                logger.warning("Topic creation failed", name=name, error=str(e))
+                await update.message.reply_text(f"Не смог создать тему «{name}»: {e}")
+                continue
+            if slug and manager is not None:
+                try:
+                    await manager.repository.upsert_mapping(
+                        project_slug=slug,
+                        chat_id=chat.id,
+                        message_thread_id=topic.message_thread_id,
+                        topic_name=name,
+                        is_active=True,
+                    )
+                except Exception as e:
+                    logger.warning("Topic mapping failed", name=name, error=str(e))
+            await update.message.reply_text(
+                f"🧵 Тема «{name}» создана" + (f" для проекта {slug}" if slug else "")
+            )
 
     # --- Mini App panel -------------------------------------------------------
 
