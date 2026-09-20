@@ -401,6 +401,13 @@ class Settings(BaseSettings):
         ),
         ge=0.0,
     )
+    tts_provider: Literal["openai", "elevenlabs"] = Field(
+        "openai",
+        description="Voice-reply engine: OpenAI voices, or ElevenLabs (supports cloned voices)",
+    )
+    elevenlabs_api_key: Optional[SecretStr] = Field(None, description="ElevenLabs API key")
+    elevenlabs_voice_id: Optional[str] = Field(None, description="ElevenLabs voice id to speak with")
+    elevenlabs_model: str = Field("eleven_v3", description="ElevenLabs TTS model")
     webapp_url: Optional[str] = Field(
         None,
         description=(

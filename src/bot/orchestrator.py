@@ -2738,6 +2738,10 @@ class MessageOrchestrator:
         spoken = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", spoken).strip()[:3500]
         if not spoken:
             return
+        if self.settings.tts_provider == "elevenlabs":
+            await self._speak_elevenlabs(update, spoken)
+            return
+
         try:
             from openai import AsyncOpenAI
 
@@ -2752,6 +2756,28 @@ class MessageOrchestrator:
             await update.message.reply_voice(voice=speech.content)
         except Exception as e:
             logger.warning("Voice reply failed", error=str(e))
+
+    async def _speak_elevenlabs(self, update: Update, text: str) -> None:
+        """Speak with an ElevenLabs voice (cloned voices live here)."""
+        key = self.settings.elevenlabs_api_key
+        voice_id = self.settings.elevenlabs_voice_id
+        if key is None or not voice_id:
+            logger.warning("ElevenLabs not configured", has_key=key is not None, voice=bool(voice_id))
+            return
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(
+                    f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                    headers={"xi-api-key": key.get_secret_value()},
+                    params={"output_format": "opus_48000_64"},
+                    json={"text": text, "model_id": self.settings.elevenlabs_model},
+                )
+                resp.raise_for_status()
+                await update.message.reply_voice(voice=resp.content)
+        except Exception as e:
+            logger.warning("ElevenLabs voice reply failed", error=str(e))
 
     # --- Per-request context: model choice and clarifying questions ---------
 

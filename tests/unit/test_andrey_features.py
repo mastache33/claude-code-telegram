@@ -413,3 +413,47 @@ async def test_create_topic_tool_creates_and_maps():
     manager.repository.upsert_mapping.assert_awaited_once()
     assert manager.repository.upsert_mapping.await_args.kwargs["project_slug"] == "gavan"
     assert "Ремонт кухни" in update.message.reply_text.await_args_list[0].args[0]
+
+
+async def test_elevenlabs_provider_used_when_selected(monkeypatch):
+    import sys
+    import types
+
+    from src.bot.orchestrator import MessageOrchestrator
+
+    calls = {}
+
+    class FakeResponse:
+        content = b"ogg"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, params=None, json=None):
+            calls.update(url=url, headers=headers, json=json)
+            return FakeResponse()
+
+    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(AsyncClient=FakeClient))
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(
+        tts_provider="elevenlabs",
+        elevenlabs_api_key=MagicMock(get_secret_value=lambda: "k"),
+        elevenlabs_voice_id="lena123",
+        elevenlabs_model="eleven_v3",
+    )
+    update = MagicMock()
+    update.message.reply_voice = AsyncMock()
+    await orch._speak_elevenlabs(update, "Привет, это Лена")
+    assert "lena123" in calls["url"] and calls["json"]["text"] == "Привет, это Лена"
+    update.message.reply_voice.assert_awaited_once()
