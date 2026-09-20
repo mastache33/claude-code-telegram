@@ -56,6 +56,58 @@ async def send_file_to_user(file_path: str, caption: str = "") -> str:
 
 
 @mcp.tool()
+async def configure_bot(
+    model: str = "",
+    voice: str = "",
+    verbosity: int = -1,
+    new_session: bool = False,
+    project: str = "",
+    show_panel: bool = False,
+) -> str:
+    """Change the Telegram bot's own settings for this chat, as the user asked in words.
+
+    Use whenever the user asks for something the bot owns rather than you:
+    "включи соннет", "перейди на opus", "отвечай голосом", "поменьше деталей",
+    "начни заново", "переключись на PHT". Do not tell the user to type /model
+    or /voice — call this tool instead and confirm in one short line.
+
+    Args:
+        model: "opus" | "sonnet" | "haiku" | "default" (or a full claude-* id).
+        voice: "auto" (voice answer to voice messages) | "on" | "off".
+        verbosity: 0 quiet, 1 normal, 2 detailed; -1 leaves it unchanged.
+        new_session: True to drop the conversation context and start fresh.
+        project: project slug or folder name to switch the workspace to.
+        show_panel: True to show the 🛠 Панель button (Mini App) in the chat.
+
+    Returns:
+        Confirmation string listing what will be applied.
+    """
+    changes = []
+    if model:
+        allowed = {"opus", "sonnet", "haiku", "fable", "default", "reset"}
+        if model.lower() not in allowed and not model.lower().startswith("claude-"):
+            return f"Error: unknown model '{model}'. Use opus, sonnet, haiku or default."
+        changes.append(f"model={model.lower()}")
+    if voice:
+        if voice.lower() not in {"auto", "on", "off"}:
+            return f"Error: voice must be auto, on or off, got '{voice}'"
+        changes.append(f"voice={voice.lower()}")
+    if verbosity != -1:
+        if verbosity not in (0, 1, 2):
+            return f"Error: verbosity must be 0, 1 or 2, got {verbosity}"
+        changes.append(f"verbosity={verbosity}")
+    if new_session:
+        changes.append("new session")
+    if project:
+        changes.append(f"project={project}")
+    if show_panel:
+        changes.append("show panel")
+    if not changes:
+        return "Error: nothing to change — pass model, voice, verbosity, new_session or project."
+    return "Bot settings queued: " + ", ".join(changes)
+
+
+@mcp.tool()
 async def send_checklist_to_user(title: str, items: list[str]) -> str:
     """Send a tappable checklist to the Telegram user.
 

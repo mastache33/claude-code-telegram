@@ -921,6 +921,7 @@ class MessageOrchestrator:
         mcp_rejected_files: Optional[List[str]] = None,
         mcp_voice: Optional[List[str]] = None,
         mcp_checklists: Optional[List[Any]] = None,
+        mcp_config: Optional[List[Dict[str, Any]]] = None,
         approved_directory: Optional[Path] = None,
         draft_streamer: Optional[DraftStreamer] = None,
         interrupt_event: Optional[asyncio.Event] = None,
@@ -946,7 +947,7 @@ class MessageOrchestrator:
         need_mcp_intercept = (
             (mcp_images is not None or mcp_files is not None)
             and approved_directory is not None
-        ) or mcp_voice is not None or mcp_checklists is not None
+        ) or mcp_voice is not None or mcp_checklists is not None or mcp_config is not None
 
         if verbose_level == 0 and not need_mcp_intercept and draft_streamer is None:
             return None
@@ -967,7 +968,12 @@ class MessageOrchestrator:
                     tc_input = tc.get("input", {})
                     file_path = tc_input.get("file_path", "")
                     caption = tc_input.get("caption", "")
-                    if mcp_checklists is not None and (
+                    if mcp_config is not None and (
+                        tc_name == "configure_bot"
+                        or tc_name.endswith("__configure_bot")
+                    ):
+                        mcp_config.append(dict(tc_input))
+                    elif mcp_checklists is not None and (
                         tc_name == "send_checklist_to_user"
                         or tc_name.endswith("__send_checklist_to_user")
                     ):
@@ -1411,6 +1417,7 @@ class MessageOrchestrator:
         mcp_files: List[FileAttachment] = []
         mcp_voice: List[str] = []
         mcp_checklists: List[Any] = []
+        mcp_config: List[Dict[str, Any]] = []
         mcp_rejected_files: List[str] = []
 
         # Stream drafts (private chats only)
@@ -1435,6 +1442,7 @@ class MessageOrchestrator:
             mcp_rejected_files=mcp_rejected_files,
             mcp_voice=mcp_voice,
             mcp_checklists=mcp_checklists,
+            mcp_config=mcp_config,
             approved_directory=self.settings.approved_directory,
             draft_streamer=draft_streamer,
             interrupt_event=interrupt_event,
@@ -1622,6 +1630,7 @@ class MessageOrchestrator:
                 logger.warning("Document send failed", error=str(file_err))
 
         if success:
+            await self._apply_bot_config(update, context, mcp_config)
             await self._send_checklists(update, mcp_checklists)
             await self._maybe_send_voice_reply(
                 update, context, claude_response.content, from_voice=False, requested=mcp_voice
@@ -2070,6 +2079,7 @@ class MessageOrchestrator:
         mcp_files_media: List[FileAttachment] = []
         mcp_voice_media: List[str] = []
         mcp_checklists_media: List[Any] = []
+        mcp_config_media: List[Dict[str, Any]] = []
         mcp_rejected_files_media: List[str] = []
         on_stream = self._make_stream_callback(
             verbose_level,
@@ -2080,6 +2090,7 @@ class MessageOrchestrator:
             mcp_files=mcp_files_media,
             mcp_voice=mcp_voice_media,
             mcp_checklists=mcp_checklists_media,
+            mcp_config=mcp_config_media,
             mcp_rejected_files=mcp_rejected_files_media,
             approved_directory=self.settings.approved_directory,
         )
@@ -2172,6 +2183,7 @@ class MessageOrchestrator:
                 logger.warning("Document send failed", error=str(file_err))
 
         if claude_response is not None and getattr(claude_response, "content", None):
+            await self._apply_bot_config(update, context, mcp_config_media)
             await self._send_checklists(update, mcp_checklists_media)
             await self._maybe_send_voice_reply(
                 update, context, claude_response.content,
@@ -2351,6 +2363,81 @@ class MessageOrchestrator:
 
 
 
+
+
+    # --- Bot settings changed by Claude on the user's behalf --------------------
+
+    async def _apply_bot_config(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        requests: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        """Apply ``configure_bot`` tool calls: model, voice, verbosity, session, project."""
+        applied: List[str] = []
+        for req in requests or []:
+            model = str(req.get("model") or "").strip().lower()
+            if model in {"default", "reset"}:
+                context.user_data.pop("model", None)
+                applied.append("модель: по умолчанию")
+            elif model:
+                context.user_data["model"] = MODEL_ALIASES.get(model, model)
+                applied.append(f"модель: {context.user_data['model']}")
+
+            voice = str(req.get("voice") or "").strip().lower()
+            if voice in {"auto", "on", "off"}:
+                context.user_data["voice_reply"] = voice
+                applied.append(f"голос: {voice}")
+
+            verbosity = req.get("verbosity", -1)
+            if isinstance(verbosity, int) and verbosity in (0, 1, 2):
+                context.user_data["verbose_level"] = verbosity
+                applied.append(f"подробность: {verbosity}")
+
+            if req.get("new_session"):
+                context.user_data["force_new_session"] = True
+                context.user_data["claude_session_id"] = None
+                applied.append("новая сессия со следующего сообщения")
+
+            project = str(req.get("project") or "").strip()
+            if project:
+                target = self._resolve_project_dir(context, project)
+                if target is None:
+                    applied.append(f"проект «{project}» не нашёл")
+                else:
+                    context.user_data["current_directory"] = target
+                    applied.append(f"проект: {target.name}")
+
+        for req in requests or []:
+            if req.get("show_panel") and self.settings.webapp_url:
+                await self.agentic_panel(update, context)
+                applied.append("панель открыта кнопкой внизу")
+                break
+
+        if applied:
+            try:
+                await update.message.reply_text("⚙️ " + "; ".join(applied))
+            except Exception as e:
+                logger.debug("Config confirmation failed", error=str(e))
+
+    def _resolve_project_dir(
+        self, context: ContextTypes.DEFAULT_TYPE, project: str
+    ) -> Optional[Path]:
+        """Find a project folder by slug or name under the approved directory."""
+        registry = context.bot_data.get("project_registry")
+        if registry is not None:
+            found = registry.get_by_slug(project.lower())
+            if found is not None and found.absolute_path.is_dir():
+                return found.absolute_path
+        base = Path(self.settings.approved_directory)
+        for candidate in (base / project, base / "Developer" / project):
+            if candidate.is_dir():
+                return candidate
+        matches = [
+            d for d in (base / "Developer").glob("*")
+            if d.is_dir() and project.lower() in d.name.lower()
+        ] if (base / "Developer").is_dir() else []
+        return matches[0] if len(matches) == 1 else None
 
     # --- Mini App panel -------------------------------------------------------
 

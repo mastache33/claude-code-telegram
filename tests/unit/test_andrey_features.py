@@ -340,3 +340,56 @@ async def test_panel_without_url_explains():
     update.message.reply_text = AsyncMock()
     await orch.agentic_panel(update, MagicMock())
     assert "не настроена" in update.message.reply_text.await_args.args[0]
+
+
+async def test_configure_bot_applies_settings(tmp_path):
+    from src.bot.orchestrator import MessageOrchestrator
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(approved_directory=tmp_path)
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.bot_data = {}
+    context.user_data = {"model": "opus", "claude_session_id": "abc"}
+
+    await orch._apply_bot_config(update, context, [
+        {"model": "sonnet", "voice": "on", "verbosity": 0, "new_session": True},
+    ])
+    assert context.user_data["model"] == "sonnet"
+    assert context.user_data["voice_reply"] == "on"
+    assert context.user_data["verbose_level"] == 0
+    assert context.user_data["force_new_session"] is True
+    assert context.user_data["claude_session_id"] is None
+    text = update.message.reply_text.await_args.args[0]
+    assert "sonnet" in text and "новая сессия" in text
+
+
+async def test_configure_bot_switches_project(tmp_path):
+    from src.bot.orchestrator import MessageOrchestrator
+
+    (tmp_path / "Developer" / "tea-app").mkdir(parents=True)
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(approved_directory=tmp_path)
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.bot_data = {}
+    context.user_data = {}
+
+    await orch._apply_bot_config(update, context, [{"project": "tea"}])
+    assert context.user_data["current_directory"] == tmp_path / "Developer" / "tea-app"
+
+
+async def test_configure_bot_tool_call_collected():
+    from src.bot.orchestrator import MessageOrchestrator
+    from src.claude.sdk_integration import StreamUpdate
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    collected: list = []
+    cb = orch._make_stream_callback(
+        verbose_level=0, progress_msg=MagicMock(), tool_log=[], start_time=0.0, mcp_config=collected,
+    )
+    await cb(StreamUpdate(type="tool_calls", tool_calls=[
+        {"name": "mcp__telegram__configure_bot", "input": {"model": "sonnet"}}]))
+    assert collected == [{"model": "sonnet"}]
