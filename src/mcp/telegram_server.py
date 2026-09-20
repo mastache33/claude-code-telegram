@@ -56,6 +56,29 @@ async def send_file_to_user(file_path: str, caption: str = "") -> str:
 
 
 @mcp.tool()
+async def speak_to_user(text: str) -> str:
+    """Speak a short message to the Telegram user as a voice message.
+
+    Use when the user asks for a spoken/voice answer, or when the reply is
+    better heard than read. Keep it under ~1200 characters of plain prose:
+    no markdown, no code, no long lists. The bot synthesises the speech and
+    delivers it after the text reply.
+
+    Args:
+        text: Plain text to read aloud, in the user's language.
+
+    Returns:
+        Confirmation string when the voice message is queued.
+    """
+    clean = text.strip()
+    if not clean:
+        return "Error: text is empty"
+    if len(clean) > 1500:
+        return f"Error: text too long ({len(clean)} chars). Keep it under 1500."
+    return f"Voice message queued ({len(clean)} chars)"
+
+
+@mcp.tool()
 async def send_image_to_user(file_path: str, caption: str = "") -> str:
     """DEPRECATED: use ``send_file_to_user`` instead.
 

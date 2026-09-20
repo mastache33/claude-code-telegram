@@ -465,6 +465,12 @@ class MessageOrchestrator:
             group=10,
         )
 
+        # Shared location -> Claude (weather, routes, "что рядом")
+        app.add_handler(
+            MessageHandler(filters.LOCATION, self._inject_deps(self.agentic_location)),
+            group=10,
+        )
+
         # Stop button callback (must be before cd: handler)
         app.add_handler(
             CallbackQueryHandler(
@@ -880,6 +886,7 @@ class MessageOrchestrator:
         mcp_images: Optional[List[ImageAttachment]] = None,
         mcp_files: Optional[List[FileAttachment]] = None,
         mcp_rejected_files: Optional[List[str]] = None,
+        mcp_voice: Optional[List[str]] = None,
         approved_directory: Optional[Path] = None,
         draft_streamer: Optional[DraftStreamer] = None,
         interrupt_event: Optional[asyncio.Event] = None,
@@ -903,8 +910,9 @@ class MessageOrchestrator:
         Typing indicators are handled by a separate heartbeat task.
         """
         need_mcp_intercept = (
-            mcp_images is not None or mcp_files is not None
-        ) and approved_directory is not None
+            (mcp_images is not None or mcp_files is not None)
+            and approved_directory is not None
+        ) or mcp_voice is not None
 
         if verbose_level == 0 and not need_mcp_intercept and draft_streamer is None:
             return None
@@ -925,7 +933,14 @@ class MessageOrchestrator:
                     tc_input = tc.get("input", {})
                     file_path = tc_input.get("file_path", "")
                     caption = tc_input.get("caption", "")
-                    if mcp_images is not None and (
+                    if mcp_voice is not None and (
+                        tc_name == "speak_to_user"
+                        or tc_name.endswith("__speak_to_user")
+                    ):
+                        spoken = str(tc_input.get("text", "")).strip()
+                        if spoken:
+                            mcp_voice.append(spoken)
+                    elif mcp_images is not None and (
                         tc_name == "send_image_to_user"
                         or tc_name.endswith("__send_image_to_user")
                     ):
@@ -1317,6 +1332,7 @@ class MessageOrchestrator:
         progress_msg = await update.message.reply_text(
             "Working...", reply_markup=stop_kb
         )
+        await self._react(update.message, "👀")
 
         # Register active request for stop callback
         active_request = ActiveRequest(
@@ -1349,6 +1365,7 @@ class MessageOrchestrator:
         start_time = time.time()
         mcp_images: List[ImageAttachment] = []
         mcp_files: List[FileAttachment] = []
+        mcp_voice: List[str] = []
         mcp_rejected_files: List[str] = []
 
         # Stream drafts (private chats only)
@@ -1371,6 +1388,7 @@ class MessageOrchestrator:
             mcp_images=mcp_images,
             mcp_files=mcp_files,
             mcp_rejected_files=mcp_rejected_files,
+            mcp_voice=mcp_voice,
             approved_directory=self.settings.approved_directory,
             draft_streamer=draft_streamer,
             interrupt_event=interrupt_event,
@@ -1558,7 +1576,10 @@ class MessageOrchestrator:
                 logger.warning("Document send failed", error=str(file_err))
 
         if success:
-            await self._maybe_send_voice_reply(update, context, claude_response.content, from_voice=False)
+            await self._maybe_send_voice_reply(
+                update, context, claude_response.content, from_voice=False, requested=mcp_voice
+            )
+        await self._react(update.message, "👍" if success else "🤔")
 
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
@@ -1934,6 +1955,40 @@ class MessageOrchestrator:
                 "Claude voice processing failed", error=str(e), user_id=user_id
             )
 
+    async def agentic_location(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Turn a shared location into a prompt for Claude."""
+        message = update.message
+        loc = message.location if message else None
+        if loc is None:
+            return
+        caption = (message.caption or "").strip()
+        prompt = (
+            f"Андрей прислал геопозицию: широта {loc.latitude:.5f}, долгота {loc.longitude:.5f}"
+            + (f" (точность ~{loc.horizontal_accuracy:.0f} м)" if loc.horizontal_accuracy else "")
+            + (f"\nЕго сообщение: {caption}" if caption else "")
+            + "\nЕсли он не уточнил задачу — скажи, что это за место, и предложи, чем помочь "
+              "(погода, маршрут, что рядом)."
+        )
+        progress_msg = await message.reply_text("📍 Смотрю место...")
+        await self._handle_agentic_media_message(
+            update=update,
+            context=context,
+            prompt=prompt,
+            progress_msg=progress_msg,
+            user_id=update.effective_user.id,
+            chat=update.effective_chat,
+        )
+
+    @staticmethod
+    async def _react(message: Any, emoji: str) -> None:
+        """Put a reaction on the user's message (best effort — reactions can be off)."""
+        try:
+            await message.set_reaction(emoji)
+        except Exception as e:
+            logger.debug("Reaction failed", emoji=emoji, error=str(e))
+
     async def _handle_agentic_media_message(
         self,
         *,
@@ -1963,6 +2018,7 @@ class MessageOrchestrator:
         tool_log: List[Dict[str, Any]] = []
         mcp_images_media: List[ImageAttachment] = []
         mcp_files_media: List[FileAttachment] = []
+        mcp_voice_media: List[str] = []
         mcp_rejected_files_media: List[str] = []
         on_stream = self._make_stream_callback(
             verbose_level,
@@ -1971,6 +2027,7 @@ class MessageOrchestrator:
             time.time(),
             mcp_images=mcp_images_media,
             mcp_files=mcp_files_media,
+            mcp_voice=mcp_voice_media,
             mcp_rejected_files=mcp_rejected_files_media,
             approved_directory=self.settings.approved_directory,
         )
@@ -2064,7 +2121,8 @@ class MessageOrchestrator:
 
         if claude_response is not None and getattr(claude_response, "content", None):
             await self._maybe_send_voice_reply(
-                update, context, claude_response.content, from_voice=update.message.voice is not None
+                update, context, claude_response.content,
+                from_voice=update.message.voice is not None, requested=mcp_voice_media,
             )
 
     async def _handle_unknown_command(
@@ -2258,11 +2316,28 @@ class MessageOrchestrator:
         await update.message.reply_text(f"Голосовые ответы: {modes[mode]}.")
 
     async def _maybe_send_voice_reply(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, from_voice: bool
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        text: str,
+        from_voice: bool,
+        requested: Optional[List[str]] = None,
     ) -> None:
+        """Speak the reply: on explicit ``speak_to_user`` calls, or per /voice mode."""
+        if requested:
+            for chunk in requested[:3]:
+                await self._speak(update, chunk)
+            return
         mode = context.user_data.get("voice_reply", "auto")
         if mode == "off" or (mode == "auto" and not from_voice) or not text or not text.strip():
             return
+        api_key = self.settings.openai_api_key
+        if api_key is None:
+            return
+        await self._speak(update, text)
+
+    async def _speak(self, update: Update, text: str) -> None:
+        """Synthesise *text* with OpenAI TTS and send it as a Telegram voice message."""
         api_key = self.settings.openai_api_key
         if api_key is None:
             return

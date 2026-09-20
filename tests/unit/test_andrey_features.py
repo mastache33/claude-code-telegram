@@ -200,3 +200,41 @@ async def test_unmapped_topic_rejected_without_default():
     context.bot_data = {"project_threads_manager": manager}
     context.user_data = {}
     assert await orch._apply_thread_routing_context(update, context) is False
+
+
+async def test_speak_to_user_tool_call_is_collected_and_spoken():
+    from src.bot.orchestrator import MessageOrchestrator
+    from src.claude.sdk_integration import StreamUpdate
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(openai_api_key=None)
+    collected: list[str] = []
+    cb = orch._make_stream_callback(
+        verbose_level=0, progress_msg=MagicMock(), tool_log=[], start_time=0.0, mcp_voice=collected,
+    )
+    await cb(StreamUpdate(type="tool_calls", tool_calls=[
+        {"name": "mcp__telegram__speak_to_user", "input": {"text": "Готово, отчёт собран"}}]))
+    assert collected == ["Готово, отчёт собран"]
+
+    spoken = []
+    orch._speak = AsyncMock(side_effect=lambda u, t: spoken.append(t))
+    context = MagicMock()
+    context.user_data = {"voice_reply": "off"}
+    await orch._maybe_send_voice_reply(MagicMock(), context, "текст ответа", from_voice=False, requested=collected)
+    assert spoken == ["Готово, отчёт собран"]
+
+
+async def test_location_message_builds_prompt_for_claude():
+    from src.bot.orchestrator import MessageOrchestrator
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch._handle_agentic_media_message = AsyncMock()
+    update = MagicMock()
+    update.message.location.latitude = 57.15222
+    update.message.location.longitude = 65.52722
+    update.message.location.horizontal_accuracy = 12.0
+    update.message.caption = "куда доехать на велике?"
+    update.message.reply_text = AsyncMock()
+    await orch.agentic_location(update, MagicMock())
+    prompt = orch._handle_agentic_media_message.await_args.kwargs["prompt"]
+    assert "57.15222" in prompt and "65.52722" in prompt and "велике" in prompt
