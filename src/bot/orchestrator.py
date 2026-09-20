@@ -6,11 +6,13 @@ classic mode, delegates to existing full-featured handlers.
 """
 
 import asyncio
+import json
 import os
 import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -22,6 +24,7 @@ from telegram import (
     InputMediaPhoto,
     Update,
 )
+from telegram import KeyboardButton, MenuButtonWebApp, ReplyKeyboardMarkup, WebAppInfo
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -160,6 +163,16 @@ class PendingToolApproval:
 
 
 @dataclass
+class Checklist:
+    """A tappable checklist message the user ticks off."""
+
+    title: str
+    items: List[str]
+    done: List[bool]
+    user_id: int
+
+
+@dataclass
 class PendingQuestion:
     """One AskUserQuestion prompt waiting for a button tap."""
 
@@ -188,6 +201,8 @@ class MessageOrchestrator:
         self._active_requests: Dict[int, ActiveRequest] = {}
         self._pending_tool_approvals: Dict[str, PendingToolApproval] = {}
         self._pending_questions: Dict[str, PendingQuestion] = {}
+        self._checklists: Dict[int, Checklist] = {}
+        self._status_messages: Dict[str, int] = {}
         self._known_commands: frozenset[str] = frozenset()
         self._skills: Dict[str, DiscoveredSkill] = discover_skills(
             settings.approved_directory
@@ -411,6 +426,7 @@ class MessageOrchestrator:
             ("verbose", self.agentic_verbose),
             ("model", self.agentic_model),
             ("voice", self.agentic_voice_mode),
+            ("panel", self.agentic_panel),
             ("repo", self.agentic_repo),
             ("restart", command.restart_command),
         ]
@@ -465,6 +481,14 @@ class MessageOrchestrator:
             group=10,
         )
 
+        # Mini App actions (web_app_data from the panel)
+        app.add_handler(
+            MessageHandler(
+                filters.StatusUpdate.WEB_APP_DATA, self._inject_deps(self.agentic_webapp_data)
+            ),
+            group=10,
+        )
+
         # Shared location -> Claude (weather, routes, "что рядом")
         app.add_handler(
             MessageHandler(filters.LOCATION, self._inject_deps(self.agentic_location)),
@@ -484,6 +508,14 @@ class MessageOrchestrator:
             CallbackQueryHandler(
                 self._inject_deps(self._handle_tool_approval_callback),
                 pattern=r"^tapv:",
+            )
+        )
+
+        # Checklist taps
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._handle_checklist_callback),
+                pattern=r"^chk:",
             )
         )
 
@@ -567,6 +599,7 @@ class MessageOrchestrator:
                 BotCommand("status", "Статус сессии"),
                 BotCommand("model", "Модель: opus / sonnet / haiku"),
                 BotCommand("voice", "Голосовые ответы: auto / on / off"),
+                BotCommand("panel", "Панель: серверы, логи, деплой, скриншот"),
                 BotCommand("verbose", "Подробность вывода (0/1/2)"),
                 BotCommand("repo", "Выбрать проект"),
                 BotCommand("restart", "Перезапустить бота"),
@@ -887,6 +920,7 @@ class MessageOrchestrator:
         mcp_files: Optional[List[FileAttachment]] = None,
         mcp_rejected_files: Optional[List[str]] = None,
         mcp_voice: Optional[List[str]] = None,
+        mcp_checklists: Optional[List[Any]] = None,
         approved_directory: Optional[Path] = None,
         draft_streamer: Optional[DraftStreamer] = None,
         interrupt_event: Optional[asyncio.Event] = None,
@@ -912,7 +946,7 @@ class MessageOrchestrator:
         need_mcp_intercept = (
             (mcp_images is not None or mcp_files is not None)
             and approved_directory is not None
-        ) or mcp_voice is not None
+        ) or mcp_voice is not None or mcp_checklists is not None
 
         if verbose_level == 0 and not need_mcp_intercept and draft_streamer is None:
             return None
@@ -933,7 +967,16 @@ class MessageOrchestrator:
                     tc_input = tc.get("input", {})
                     file_path = tc_input.get("file_path", "")
                     caption = tc_input.get("caption", "")
-                    if mcp_voice is not None and (
+                    if mcp_checklists is not None and (
+                        tc_name == "send_checklist_to_user"
+                        or tc_name.endswith("__send_checklist_to_user")
+                    ):
+                        items = [str(i).strip() for i in (tc_input.get("items") or []) if str(i).strip()]
+                        if items:
+                            mcp_checklists.append(
+                                (str(tc_input.get("title", "")).strip() or "Чек-лист", items[:20])
+                            )
+                    elif mcp_voice is not None and (
                         tc_name == "speak_to_user"
                         or tc_name.endswith("__speak_to_user")
                     ):
@@ -1333,6 +1376,7 @@ class MessageOrchestrator:
             "Working...", reply_markup=stop_kb
         )
         await self._react(update.message, "👀")
+        await self._update_status(update, context, "⏳ работаю", message_text)
 
         # Register active request for stop callback
         active_request = ActiveRequest(
@@ -1366,6 +1410,7 @@ class MessageOrchestrator:
         mcp_images: List[ImageAttachment] = []
         mcp_files: List[FileAttachment] = []
         mcp_voice: List[str] = []
+        mcp_checklists: List[Any] = []
         mcp_rejected_files: List[str] = []
 
         # Stream drafts (private chats only)
@@ -1389,6 +1434,7 @@ class MessageOrchestrator:
             mcp_files=mcp_files,
             mcp_rejected_files=mcp_rejected_files,
             mcp_voice=mcp_voice,
+            mcp_checklists=mcp_checklists,
             approved_directory=self.settings.approved_directory,
             draft_streamer=draft_streamer,
             interrupt_event=interrupt_event,
@@ -1576,10 +1622,14 @@ class MessageOrchestrator:
                 logger.warning("Document send failed", error=str(file_err))
 
         if success:
+            await self._send_checklists(update, mcp_checklists)
             await self._maybe_send_voice_reply(
                 update, context, claude_response.content, from_voice=False, requested=mcp_voice
             )
         await self._react(update.message, "👍" if success else "🤔")
+        await self._update_status(
+            update, context, "✅ готов" if success else "⚠️ ошибка", message_text
+        )
 
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
@@ -2019,6 +2069,7 @@ class MessageOrchestrator:
         mcp_images_media: List[ImageAttachment] = []
         mcp_files_media: List[FileAttachment] = []
         mcp_voice_media: List[str] = []
+        mcp_checklists_media: List[Any] = []
         mcp_rejected_files_media: List[str] = []
         on_stream = self._make_stream_callback(
             verbose_level,
@@ -2028,6 +2079,7 @@ class MessageOrchestrator:
             mcp_images=mcp_images_media,
             mcp_files=mcp_files_media,
             mcp_voice=mcp_voice_media,
+            mcp_checklists=mcp_checklists_media,
             mcp_rejected_files=mcp_rejected_files_media,
             approved_directory=self.settings.approved_directory,
         )
@@ -2120,6 +2172,7 @@ class MessageOrchestrator:
                 logger.warning("Document send failed", error=str(file_err))
 
         if claude_response is not None and getattr(claude_response, "content", None):
+            await self._send_checklists(update, mcp_checklists_media)
             await self._maybe_send_voice_reply(
                 update, context, claude_response.content,
                 from_voice=update.message.voice is not None, requested=mcp_voice_media,
@@ -2295,6 +2348,207 @@ class MessageOrchestrator:
         except Exception:
             pass
 
+
+
+
+
+    # --- Mini App panel -------------------------------------------------------
+
+    async def agentic_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/panel — show the keyboard button that opens the Mini App."""
+        if not self.settings.webapp_url:
+            await update.message.reply_text("Панель не настроена: не задан WEBAPP_URL.")
+            return
+        keyboard = ReplyKeyboardMarkup(
+            [[KeyboardButton("🛠 Панель", web_app=WebAppInfo(url=self.settings.webapp_url))]],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
+        await update.message.reply_text(
+            "Кнопка «🛠 Панель» внизу: серверы, логи, деплой, скриншоты, сводка.",
+            reply_markup=keyboard,
+        )
+
+    async def setup_menu_button(self, bot: Any) -> None:
+        """Point the chat menu button at the Mini App (view mode)."""
+        if not self.settings.webapp_url:
+            return
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Панель", web_app=WebAppInfo(url=self.settings.webapp_url)
+                )
+            )
+        except Exception as e:
+            logger.warning("Menu button setup failed", error=str(e))
+
+    async def agentic_webapp_data(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Turn a tap in the Mini App into a Claude request."""
+        raw = update.message.web_app_data.data if update.message.web_app_data else ""
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            payload = {"prompt": str(raw)}
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            await update.message.reply_text("Панель прислала пустую команду.")
+            return
+        label = str(payload.get("label") or prompt)[:60]
+        logger.info("Mini App action", action=payload.get("action"), user_id=update.effective_user.id)
+        progress_msg = await update.message.reply_text(f"🛠 {label}...")
+        await self._handle_agentic_media_message(
+            update=update, context=context, prompt=prompt, progress_msg=progress_msg,
+            user_id=update.effective_user.id, chat=update.effective_chat,
+        )
+
+    # --- Pinned status message ------------------------------------------------
+
+    async def _update_status(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        stage: str,
+        detail: str = "",
+    ) -> None:
+        """Keep one pinned message per chat/topic: project, model, what is happening now."""
+        if not self.settings.enable_pinned_status:
+            return
+        chat = update.effective_chat
+        message = update.effective_message
+        if chat is None or message is None:
+            return
+        thread_id = self._extract_message_thread_id(update)
+        key = f"{chat.id}:{thread_id or 'main'}"
+
+        thread_context = context.user_data.get("_thread_context") or {}
+        where = thread_context.get("project_name") or Path(
+            str(context.user_data.get("current_directory") or self.settings.approved_directory)
+        ).name
+        model = context.user_data.get("model") or self.settings.claude_model or "по умолчанию"
+        text = (
+            f"📌 <b>{escape_html(str(where))}</b>\n"
+            f"🧠 {escape_html(str(model))}\n"
+            f"{stage}"
+            + (f"\n<i>{escape_html(detail[:120])}</i>" if detail else "")
+            + f"\n🕒 {time.strftime('%H:%M')}"
+        )
+
+        message_id = self._status_messages.get(key)
+        if message_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat.id, message_id=message_id, text=text, parse_mode="HTML"
+                )
+                return
+            except Exception as e:
+                if "not modified" in str(e).lower():
+                    return
+                self._status_messages.pop(key, None)
+
+        try:
+            sent = await context.bot.send_message(
+                chat_id=chat.id, text=text, parse_mode="HTML",
+                message_thread_id=thread_id, disable_notification=True,
+            )
+            self._status_messages[key] = sent.message_id
+            await context.bot.pin_chat_message(
+                chat_id=chat.id, message_id=sent.message_id, disable_notification=True
+            )
+        except Exception as e:
+            logger.debug("Pinned status failed", error=str(e))
+
+    # --- Checklists (tappable, Telegram-native ones need a business account) ---
+
+    async def _send_checklists(self, update: Update, checklists: Optional[List[Any]]) -> None:
+        for title, items in checklists or []:
+            state = Checklist(
+                title=title, items=items, done=[False] * len(items),
+                user_id=update.effective_user.id,
+            )
+            try:
+                msg = await update.message.reply_text(
+                    self._checklist_text(state),
+                    parse_mode="HTML",
+                    reply_markup=self._checklist_keyboard(0, state),
+                )
+            except Exception as e:
+                logger.warning("Checklist send failed", error=str(e))
+                continue
+            self._checklists[msg.message_id] = state
+            try:
+                await msg.edit_reply_markup(self._checklist_keyboard(msg.message_id, state))
+            except Exception:
+                pass
+
+    @staticmethod
+    def _checklist_text(state: Checklist) -> str:
+        done = sum(state.done)
+        lines = [f"📋 <b>{escape_html(state.title)}</b> — {done}/{len(state.items)}"]
+        lines += [
+            f"{'✅' if ok else '⬜️'} <s>{escape_html(item)}</s>" if ok else f"⬜️ {escape_html(item)}"
+            for item, ok in zip(state.items, state.done)
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _checklist_keyboard(message_id: int, state: Checklist) -> InlineKeyboardMarkup:
+        rows = [
+            [InlineKeyboardButton(f"{'✅' if ok else '⬜️'} {item}"[:60], callback_data=f"chk:{message_id}:{i}")]
+            for i, (item, ok) in enumerate(zip(state.items, state.done))
+        ]
+        rows.append([InlineKeyboardButton("📨 Отчитаться Claude", callback_data=f"chk:{message_id}:report")])
+        return InlineKeyboardMarkup(rows)
+
+    async def _handle_checklist_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle chk: callbacks — tick items off and report progress back to Claude."""
+        query = update.callback_query
+        _, raw_id, action = query.data.split(":", 2)
+        message_id = int(raw_id) or query.message.message_id
+        state = self._checklists.get(message_id) or self._checklists.get(query.message.message_id)
+        if state is None:
+            await query.answer("Чек-лист устарел — попроси новый.", show_alert=True)
+            return
+        if update.effective_user.id != state.user_id:
+            await query.answer("Это не твой чек-лист.", show_alert=True)
+            return
+
+        if action == "report":
+            done = [i for i, ok in zip(state.items, state.done) if ok]
+            left = [i for i, ok in zip(state.items, state.done) if not ok]
+            await query.answer("Передаю Claude")
+            prompt = (
+                f"Отчёт по чек-листу «{state.title}»: сделано {len(done)} из {len(state.items)}.\n"
+                + ("Сделано: " + "; ".join(done) + "\n" if done else "")
+                + ("Осталось: " + "; ".join(left) + "\n" if left else "")
+                + "Продолжи с того, что осталось, или подведи итог, если всё готово."
+            )
+            proxy = SimpleNamespace(
+                message=query.message,
+                effective_user=query.from_user,
+                effective_chat=query.message.chat,
+                effective_message=query.message,
+            )
+            progress_msg = await query.message.reply_text("Смотрю чек-лист...")
+            await self._handle_agentic_media_message(
+                update=proxy, context=context, prompt=prompt, progress_msg=progress_msg,
+                user_id=state.user_id, chat=query.message.chat,
+            )
+            return
+
+        index = int(action)
+        state.done[index] = not state.done[index]
+        await query.answer("Готово" if state.done[index] else "Снял отметку")
+        try:
+            await query.edit_message_text(
+                self._checklist_text(state), parse_mode="HTML",
+                reply_markup=self._checklist_keyboard(message_id, state),
+            )
+        except Exception as e:
+            logger.debug("Checklist update failed", error=str(e))
 
     # --- Voice replies (OpenAI TTS) -----------------------------------------
 

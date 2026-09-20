@@ -36,7 +36,7 @@ class StopAwareUpdateProcessor(BaseUpdateProcessor):
     concurrently too, or it would deadlock waiting behind itself.
     """
 
-    _PRIORITY_PREFIXES = ("stop:", "tapv:", "askq:")
+    _PRIORITY_PREFIXES = ("stop:", "tapv:", "askq:", "chk:")
 
     def __init__(self) -> None:
         # High limit so priority callbacks are never blocked by semaphore

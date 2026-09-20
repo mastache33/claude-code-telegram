@@ -401,6 +401,19 @@ class Settings(BaseSettings):
         ),
         ge=0.0,
     )
+    webapp_url: Optional[str] = Field(
+        None,
+        description=(
+            "HTTPS URL of the Telegram Mini App panel. Set to show the 🛠 Панель button "
+            "and the chat menu button; unset disables the panel."
+        ),
+    )
+    enable_pinned_status: bool = Field(
+        False,
+        description=(
+            "Keep one pinned message per chat/topic with the current project, model and status"
+        ),
+    )
     project_threads_default_slug: Optional[str] = Field(
         None,
         description=(

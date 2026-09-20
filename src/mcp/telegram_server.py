@@ -56,6 +56,32 @@ async def send_file_to_user(file_path: str, caption: str = "") -> str:
 
 
 @mcp.tool()
+async def send_checklist_to_user(title: str, items: list[str]) -> str:
+    """Send a tappable checklist to the Telegram user.
+
+    Use for multi-step work the user will do (or verify) themselves: release
+    steps, manual QA, shopping, packing. The user taps items to tick them off
+    and can report the state back to you with one button.
+
+    Args:
+        title: Short checklist title, e.g. "Выкат TeaMate".
+        items: 1-20 short steps, each under 80 characters.
+
+    Returns:
+        Confirmation string when the checklist is queued.
+    """
+    clean = [str(i).strip() for i in items if str(i).strip()]
+    if not clean:
+        return "Error: items are empty"
+    if len(clean) > 20:
+        return f"Error: too many items ({len(clean)}). Keep it under 20."
+    too_long = [i for i in clean if len(i) > 80]
+    if too_long:
+        return f"Error: item too long ({len(too_long[0])} chars): {too_long[0][:40]}..."
+    return f"Checklist queued: {title.strip() or 'Чек-лист'} ({len(clean)} items)"
+
+
+@mcp.tool()
 async def speak_to_user(text: str) -> str:
     """Speak a short message to the Telegram user as a voice message.
 

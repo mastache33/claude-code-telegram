@@ -238,3 +238,105 @@ async def test_location_message_builds_prompt_for_claude():
     await orch.agentic_location(update, MagicMock())
     prompt = orch._handle_agentic_media_message.await_args.kwargs["prompt"]
     assert "57.15222" in prompt and "65.52722" in prompt and "велике" in prompt
+
+
+async def test_checklist_toggle_and_report():
+    from src.bot.orchestrator import Checklist, MessageOrchestrator
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch._handle_agentic_media_message = AsyncMock()
+    state = Checklist(title="Выкат", items=["тесты", "деплой"], done=[False, False], user_id=7)
+    orch._checklists = {55: state}
+
+    update = MagicMock()
+    update.effective_user.id = 7
+    update.callback_query.data = "chk:55:0"
+    update.callback_query.message.message_id = 55
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+    await orch._handle_checklist_callback(update, MagicMock())
+    assert state.done == [True, False]
+    assert "✅" in orch._checklist_text(state) and "1/2" in orch._checklist_text(state)
+
+    update.callback_query.data = "chk:55:report"
+    update.callback_query.message.reply_text = AsyncMock()
+    await orch._handle_checklist_callback(update, MagicMock())
+    prompt = orch._handle_agentic_media_message.await_args.kwargs["prompt"]
+    assert "сделано 1 из 2" in prompt and "тесты" in prompt and "деплой" in prompt
+
+
+async def test_checklist_tool_call_collected():
+    from src.bot.orchestrator import MessageOrchestrator
+    from src.claude.sdk_integration import StreamUpdate
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    collected: list = []
+    cb = orch._make_stream_callback(
+        verbose_level=0, progress_msg=MagicMock(), tool_log=[], start_time=0.0, mcp_checklists=collected,
+    )
+    await cb(StreamUpdate(type="tool_calls", tool_calls=[
+        {"name": "mcp__telegram__send_checklist_to_user",
+         "input": {"title": "Выкат", "items": ["тесты", " ", "деплой"]}}]))
+    assert collected == [("Выкат", ["тесты", "деплой"])]
+
+
+async def test_pinned_status_creates_then_edits(tmp_path):
+    from src.bot.orchestrator import MessageOrchestrator
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(enable_pinned_status=True, claude_model=None, approved_directory=tmp_path)
+    orch._status_messages = {}
+    orch._extract_message_thread_id = MagicMock(return_value=None)
+
+    update = MagicMock()
+    update.effective_chat.id = 10
+    context = MagicMock()
+    context.user_data = {"current_directory": tmp_path / "PHT", "model": "sonnet"}
+    context.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+    context.bot.pin_chat_message = AsyncMock()
+    context.bot.edit_message_text = AsyncMock()
+
+    await orch._update_status(update, context, "⏳ работаю", "почини логи")
+    assert orch._status_messages == {"10:main": 99}
+    context.bot.pin_chat_message.assert_awaited_once()
+    sent_text = context.bot.send_message.await_args.kwargs["text"]
+    assert "PHT" in sent_text and "sonnet" in sent_text and "почини логи" in sent_text
+
+    await orch._update_status(update, context, "✅ готов")
+    context.bot.edit_message_text.assert_awaited_once()
+    assert context.bot.send_message.await_count == 1
+
+
+async def test_pinned_status_off_by_default():
+    from src.bot.orchestrator import MessageOrchestrator
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(enable_pinned_status=False)
+    context = MagicMock()
+    context.bot.send_message = AsyncMock()
+    await orch._update_status(MagicMock(), context, "⏳ работаю")
+    context.bot.send_message.assert_not_awaited()
+
+
+async def test_webapp_data_becomes_claude_prompt():
+    from src.bot.orchestrator import MessageOrchestrator
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch._handle_agentic_media_message = AsyncMock()
+    update = MagicMock()
+    update.message.web_app_data.data = '{"action":"logs","label":"Логи PHT","prompt":"покажи логи pht"}'
+    update.message.reply_text = AsyncMock()
+    await orch.agentic_webapp_data(update, MagicMock())
+    assert orch._handle_agentic_media_message.await_args.kwargs["prompt"] == "покажи логи pht"
+    assert "Логи PHT" in update.message.reply_text.await_args.args[0]
+
+
+async def test_panel_without_url_explains():
+    from src.bot.orchestrator import MessageOrchestrator
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(webapp_url=None)
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    await orch.agentic_panel(update, MagicMock())
+    assert "не настроена" in update.message.reply_text.await_args.args[0]

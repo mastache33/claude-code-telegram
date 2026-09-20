@@ -82,7 +82,7 @@ def deps():
     }
 
 
-def test_agentic_registers_8_commands(agentic_settings, deps):
+def test_agentic_registers_9_commands(agentic_settings, deps):
     """Agentic mode registers start, new, status, verbose, repo, restart commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
@@ -100,13 +100,14 @@ def test_agentic_registers_8_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 8
+    assert len(cmd_handlers) == 9
     assert frozenset({"start"}) in commands
     assert frozenset({"new"}) in commands
     assert frozenset({"status"}) in commands
     assert frozenset({"verbose"}) in commands
     assert frozenset({"model"}) in commands
     assert frozenset({"voice"}) in commands
+    assert frozenset({"panel"}) in commands
     assert frozenset({"repo"}) in commands
     assert frozenset({"restart"}) in commands
 
@@ -151,21 +152,21 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
         if isinstance(call[0][0], CallbackQueryHandler)
     ]
 
-    # 6 message handlers (text, document, photo, voice, location, unknown commands passthrough)
-    assert len(msg_handlers) == 6
-    # 4 callback handlers (stop: + tapv: + askq: + cd:)
-    assert len(cb_handlers) == 4
+    # 7 message handlers (text, document, photo, voice, web_app_data, location, unknown commands)
+    assert len(msg_handlers) == 7
+    # 5 callback handlers (stop: + tapv: + askq: + chk: + cd:)
+    assert len(cb_handlers) == 5
 
 
 async def test_agentic_bot_commands(agentic_settings, deps, tmp_path, monkeypatch):
-    """Agentic mode returns 8 bot commands."""
+    """Agentic mode returns 9 bot commands."""
     monkeypatch.setenv("HOME", str(tmp_path))
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 8
+    assert len(commands) == 9
     cmd_names = [c.command for c in commands]
-    assert cmd_names == ["start", "new", "status", "model", "voice", "verbose", "repo", "restart"]
+    assert cmd_names == ["start", "new", "status", "model", "voice", "panel", "verbose", "repo", "restart"]
 
 
 async def test_classic_bot_commands(classic_settings, deps):
@@ -341,7 +342,7 @@ async def test_agentic_callback_scoped_to_cd_pattern(agentic_settings, deps):
         if isinstance(call[0][0], CallbackQueryHandler)
     ]
 
-    assert len(cb_handlers) == 4
+    assert len(cb_handlers) == 5
     # Find the cd: handler by pattern
     cd_handler = [h for h in cb_handlers if h.pattern and h.pattern.match("cd:x")]
     assert len(cd_handler) == 1

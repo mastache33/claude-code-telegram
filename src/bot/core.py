@@ -141,6 +141,7 @@ class ClaudeCodeBot:
         """Set bot command menu via orchestrator."""
         commands = await self.orchestrator.get_bot_commands()
         await self.app.bot.set_my_commands(commands)
+        await self.orchestrator.setup_menu_button(self.app.bot)
         logger.info("Bot commands set", commands=[cmd.command for cmd in commands])
 
     def _register_handlers(self) -> None:
