@@ -457,3 +457,44 @@ async def test_elevenlabs_provider_used_when_selected(monkeypatch):
     await orch._speak_elevenlabs(update, "Привет, это Лена")
     assert "lena123" in calls["url"] and calls["json"]["text"] == "Привет, это Лена"
     update.message.reply_voice.assert_awaited_once()
+
+
+async def test_mac_voice_falls_back_when_mac_offline(monkeypatch):
+    from src.bot.orchestrator import MessageOrchestrator
+
+    async def fake_exec(*args, **kwargs):
+        proc = MagicMock()
+        proc.returncode = 255
+        proc.communicate = AsyncMock(return_value=(b"", b"ssh: connect timed out"))
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(mac_tts_host="mac", mac_tts_command="~/.local/bin/say-lena-f5")
+    assert await orch._speak_mac(MagicMock(), "привет") is False
+
+
+async def test_mac_voice_sends_when_available(monkeypatch, tmp_path):
+    from src.bot.orchestrator import MessageOrchestrator
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    calls = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(args[0])
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"/tmp/claude-voice.wav", b""))
+        if args[0] == "scp":
+            next(p for p in args if str(p).endswith(".wav") and str(tmp_path) in str(p))
+            Path([p for p in args if str(tmp_path) in str(p)][0]).write_bytes(b"RIFFfake")
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(mac_tts_host="mac", mac_tts_command="~/.local/bin/say-lena-f5")
+    update = MagicMock()
+    update.message.reply_voice = AsyncMock()
+    assert await orch._speak_mac(update, "привет") is True
+    assert calls[:3] == ["ssh", "scp", "ffmpeg"]
+    update.message.reply_voice.assert_awaited_once()

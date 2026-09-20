@@ -7,6 +7,8 @@ classic mode, delegates to existing full-featured handlers.
 
 import asyncio
 import json
+import shlex
+import tempfile
 import os
 import re
 import time
@@ -2741,6 +2743,8 @@ class MessageOrchestrator:
         if self.settings.tts_provider == "elevenlabs":
             await self._speak_elevenlabs(update, spoken)
             return
+        if self.settings.tts_provider == "mac" and await self._speak_mac(update, spoken):
+            return
 
         try:
             from openai import AsyncOpenAI
@@ -2756,6 +2760,50 @@ class MessageOrchestrator:
             await update.message.reply_voice(voice=speech.content)
         except Exception as e:
             logger.warning("Voice reply failed", error=str(e))
+
+    async def _speak_mac(self, update: Update, text: str) -> bool:
+        """Synthesise with the cloned voice on the owner's Mac; False if it is unreachable."""
+        host = self.settings.mac_tts_host
+        remote_out = "/tmp/claude-voice.wav"
+        local_wav = Path(tempfile.gettempdir()) / f"voice-{uuid.uuid4().hex[:8]}.wav"
+        local_ogg = local_wav.with_suffix(".ogg")
+        try:
+            synth = await asyncio.create_subprocess_exec(
+                "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host,
+                f"{self.settings.mac_tts_command} {shlex.quote(text)} {remote_out}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await asyncio.wait_for(synth.communicate(), timeout=300)
+            if synth.returncode != 0:
+                logger.info("Mac voice unavailable", error=err.decode()[-200:])
+                return False
+
+            fetch = await asyncio.create_subprocess_exec(
+                "scp", "-q", "-o", "BatchMode=yes", f"{host}:{remote_out}", str(local_wav),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(fetch.communicate(), timeout=120)
+            if fetch.returncode != 0 or not local_wav.is_file():
+                return False
+
+            convert = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-y", "-i", str(local_wav),
+                "-c:a", "libopus", "-b:a", "48k", "-ar", "48000", "-ac", "1", str(local_ogg),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(convert.communicate(), timeout=120)
+            voice_file = local_ogg if local_ogg.is_file() else local_wav
+            await update.message.reply_voice(voice=voice_file.read_bytes())
+            return True
+        except (asyncio.TimeoutError, OSError) as e:
+            logger.info("Mac voice failed", error=str(e)[:200])
+            return False
+        finally:
+            for path in (local_wav, local_ogg):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     async def _speak_elevenlabs(self, update: Update, text: str) -> None:
         """Speak with an ElevenLabs voice (cloned voices live here)."""

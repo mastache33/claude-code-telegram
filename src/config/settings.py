@@ -401,9 +401,17 @@ class Settings(BaseSettings):
         ),
         ge=0.0,
     )
-    tts_provider: Literal["openai", "elevenlabs"] = Field(
+    tts_provider: Literal["openai", "elevenlabs", "mac"] = Field(
         "openai",
-        description="Voice-reply engine: OpenAI voices, or ElevenLabs (supports cloned voices)",
+        description=(
+            "Voice-reply engine: OpenAI voices, ElevenLabs, or a cloned voice synthesised "
+            "on the owner's Mac over SSH (falls back to OpenAI when the Mac is offline)"
+        ),
+    )
+    mac_tts_host: str = Field("mac", description="SSH host alias of the Mac running the voice model")
+    mac_tts_command: str = Field(
+        "~/.local/bin/say-lena-f5",
+        description="Command on the Mac that takes text and an output path and prints the wav path",
     )
     elevenlabs_api_key: Optional[SecretStr] = Field(None, description="ElevenLabs API key")
     elevenlabs_voice_id: Optional[str] = Field(None, description="ElevenLabs voice id to speak with")
