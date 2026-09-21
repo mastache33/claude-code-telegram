@@ -408,7 +408,13 @@ class Settings(BaseSettings):
             "on the owner's Mac over SSH (falls back to OpenAI when the Mac is offline)"
         ),
     )
-    mac_tts_host: str = Field("mac", description="SSH host alias of the Mac running the voice model")
+    mac_tts_host: str = Field(
+        "mac",
+        description=(
+            "SSH host alias(es) with the cloned-voice model, comma separated and tried in order "
+            "(e.g. 'pc,mac'); the first one that answers synthesises the reply"
+        ),
+    )
     mac_tts_command: str = Field(
         "~/.local/bin/say-lena-f5",
         description="Command on the Mac that takes text and an output path and prints the wav path",

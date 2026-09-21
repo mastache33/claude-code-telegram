@@ -2763,7 +2763,14 @@ class MessageOrchestrator:
 
     async def _speak_mac(self, update: Update, text: str) -> bool:
         """Synthesise with the cloned voice on the owner's Mac; False if it is unreachable."""
-        host = self.settings.mac_tts_host
+        hosts = [h.strip() for h in str(self.settings.mac_tts_host).split(",") if h.strip()]
+        for host in hosts:
+            if await self._speak_on_host(host, update, text):
+                return True
+        return False
+
+    async def _speak_on_host(self, host: str, update: Update, text: str) -> bool:
+        """Synthesise on one host; False if it is unreachable or the command fails."""
         remote_out = "/tmp/claude-voice.wav"
         local_wav = Path(tempfile.gettempdir()) / f"voice-{uuid.uuid4().hex[:8]}.wav"
         local_ogg = local_wav.with_suffix(".ogg")

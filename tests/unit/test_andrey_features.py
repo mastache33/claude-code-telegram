@@ -498,3 +498,31 @@ async def test_mac_voice_sends_when_available(monkeypatch, tmp_path):
     assert await orch._speak_mac(update, "привет") is True
     assert calls[:3] == ["ssh", "scp", "ffmpeg"]
     update.message.reply_voice.assert_awaited_once()
+
+
+async def test_voice_tries_hosts_in_order(monkeypatch):
+    from src.bot.orchestrator import MessageOrchestrator
+
+    tried = []
+
+    async def fake_host(self, host, update, text):
+        tried.append(host)
+        return host == "mac"
+
+    monkeypatch.setattr(MessageOrchestrator, "_speak_on_host", fake_host)
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(mac_tts_host="pc, mac")
+    assert await orch._speak_mac(MagicMock(), "привет") is True
+    assert tried == ["pc", "mac"]
+
+
+async def test_voice_returns_false_when_all_hosts_down(monkeypatch):
+    from src.bot.orchestrator import MessageOrchestrator
+
+    async def fake_host(self, host, update, text):
+        return False
+
+    monkeypatch.setattr(MessageOrchestrator, "_speak_on_host", fake_host)
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(mac_tts_host="pc,mac")
+    assert await orch._speak_mac(MagicMock(), "привет") is False
