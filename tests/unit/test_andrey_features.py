@@ -526,3 +526,22 @@ async def test_voice_returns_false_when_all_hosts_down(monkeypatch):
     orch = MessageOrchestrator.__new__(MessageOrchestrator)
     orch.settings = MagicMock(mac_tts_host="pc,mac")
     assert await orch._speak_mac(MagicMock(), "привет") is False
+
+
+@pytest.mark.parametrize("asked,expected", [(True, True), (False, False)])
+async def test_voice_request_in_text_forces_speaking(asked, expected):
+    from src.bot.orchestrator import MessageOrchestrator, VOICE_REQUEST_RE
+
+    assert bool(VOICE_REQUEST_RE.search("напиши от Лены её голосом")) is True
+    assert bool(VOICE_REQUEST_RE.search("почини логи")) is False
+
+    orch = MessageOrchestrator.__new__(MessageOrchestrator)
+    orch.settings = MagicMock(tts_provider="openai")
+    spoken = []
+    orch._speak = AsyncMock(side_effect=lambda u, t: spoken.append(t))
+    context = MagicMock()
+    context.user_data = {"voice_reply": "auto"}
+    await orch._maybe_send_voice_reply(
+        MagicMock(), context, "ответ", from_voice=False, asked_for_voice=asked
+    )
+    assert bool(spoken) is expected

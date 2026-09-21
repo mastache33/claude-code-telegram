@@ -185,6 +185,10 @@ class PendingQuestion:
     selected: List[int] = field(default_factory=list)
 
 
+VOICE_REQUEST_RE = re.compile(
+    r"голос|озвуч|скажи вслух|проговор|наговор|voice", re.IGNORECASE
+)
+
 MODEL_ALIASES = {
     "opus": "opus",
     "sonnet": "sonnet",
@@ -1645,7 +1649,8 @@ class MessageOrchestrator:
             await self._create_topics(update, context, mcp_topics)
             await self._send_checklists(update, mcp_checklists)
             await self._maybe_send_voice_reply(
-                update, context, claude_response.content, from_voice=False, requested=mcp_voice
+                update, context, claude_response.content, from_voice=False, requested=mcp_voice,
+                asked_for_voice=bool(VOICE_REQUEST_RE.search(message_text or "")),
             )
         await self._react(update.message, "👍" if success else "🤔")
         await self._update_status(
@@ -2716,14 +2721,19 @@ class MessageOrchestrator:
         text: str,
         from_voice: bool,
         requested: Optional[List[str]] = None,
+        asked_for_voice: bool = False,
     ) -> None:
-        """Speak the reply: on explicit ``speak_to_user`` calls, or per /voice mode."""
+        """Speak the reply: on explicit ``speak_to_user`` calls, a voice request, or /voice mode."""
         if requested:
             for chunk in requested[:3]:
                 await self._speak(update, chunk)
             return
         mode = context.user_data.get("voice_reply", "auto")
-        if mode == "off" or (mode == "auto" and not from_voice) or not text or not text.strip():
+        if mode == "off" and not asked_for_voice:
+            return
+        if mode == "auto" and not from_voice and not asked_for_voice:
+            return
+        if not text or not text.strip():
             return
         api_key = self.settings.openai_api_key
         if api_key is None:
