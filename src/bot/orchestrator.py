@@ -2747,7 +2747,8 @@ class MessageOrchestrator:
             return
         spoken = re.sub(r"```.*?```", " (код в тексте) ", text, flags=re.S)
         spoken = re.sub(r"[*_`#>|]", "", spoken)
-        spoken = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", spoken).strip()[:3500]
+        limit = 900 if self.settings.tts_provider == "mac" else 3500
+        spoken = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", spoken).strip()[:limit]
         if not spoken:
             return
         if self.settings.tts_provider == "elevenlabs":
@@ -2790,7 +2791,7 @@ class MessageOrchestrator:
                 f"{self.settings.mac_tts_command} {shlex.quote(text)} {remote_out}",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            _, err = await asyncio.wait_for(synth.communicate(), timeout=300)
+            _, err = await asyncio.wait_for(synth.communicate(), timeout=900)
             if synth.returncode != 0:
                 logger.info("Mac voice unavailable", error=err.decode()[-200:])
                 return False
