@@ -1680,6 +1680,12 @@ class MessageOrchestrator:
             filename=document.file_name,
         )
 
+        features = context.bot_data.get("features")
+        image_handler = features.get_image_handler() if features else None
+        if image_handler and image_handler.is_image_document(document):
+            await self._process_document_image(update, context, image_handler)
+            return
+
         # Security validation
         security_validator = context.bot_data.get("security_validator")
         if security_validator:
@@ -1701,7 +1707,6 @@ class MessageOrchestrator:
         progress_msg = await update.message.reply_text("Working...")
 
         # Try enhanced file handler, fall back to basic
-        features = context.bot_data.get("features")
         file_handler = features.get_file_handler() if features else None
         prompt: Optional[str] = None
 
@@ -1860,6 +1865,53 @@ class MessageOrchestrator:
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
         finally:
             heartbeat.cancel()
+
+    async def _process_document_image(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        image_handler: Any,
+    ) -> None:
+        """Send an image uploaded as a file (HEIC, TIFF, PNG...) to Claude."""
+        document = update.message.document
+        max_size = 20 * 1024 * 1024
+        if document.file_size and document.file_size > max_size:
+            await update.message.reply_text(
+                f"File too large ({document.file_size / 1024 / 1024:.1f}MB). Max: 20MB."
+            )
+            return
+
+        chat = update.message.chat
+        await chat.send_action("typing")
+        progress_msg = await update.message.reply_text("Working...")
+        try:
+            processed = await image_handler.process_document_image(
+                document, update.message.caption
+            )
+            fmt = processed.metadata.get("format", "jpeg")
+            await self._handle_agentic_media_message(
+                update=update,
+                context=context,
+                prompt=f"{processed.prompt}\n\n(File: {document.file_name})",
+                progress_msg=progress_msg,
+                user_id=update.effective_user.id,
+                chat=chat,
+                images=[
+                    {
+                        "data": processed.base64_data,
+                        "media_type": _MEDIA_TYPE_MAP.get(fmt, "image/jpeg"),
+                    }
+                ],
+            )
+        except Exception as e:
+            from .handlers.message import _format_error_message
+
+            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
+            logger.error(
+                "Document image processing failed",
+                error=str(e),
+                filename=document.file_name,
+            )
 
     async def agentic_photo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

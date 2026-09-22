@@ -53,6 +53,8 @@ fastapi = "^0.115.0"
 uvicorn = {version = "^0.34.0", extras = ["standard"]}
 apscheduler = "^3.10"
 PyYAML = "^6.0.2"
+Pillow = ">=10.0"
+pillow-heif = ">=0.18"
 mistralai = {version = "^1.0.0", optional = true}
 openai = {version = "^1.0.0", optional = true}
 

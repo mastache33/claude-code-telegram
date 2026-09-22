@@ -9,12 +9,35 @@ Features:
 """
 
 import base64
+import io
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional
 
-from telegram import PhotoSize
+from PIL import Image, ImageOps
+from pillow_heif import register_heif_opener
+from telegram import Document, PhotoSize
 
 from src.config import Settings
+
+register_heif_opener()
+
+DOCUMENT_IMAGE_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".heic",
+    ".heif",
+    ".avif",
+    ".tif",
+    ".tiff",
+    ".bmp",
+}
+NATIVE_FORMATS = {"png", "jpeg", "gif", "webp"}
+MAX_NATIVE_BYTES = 5 * 1024 * 1024
+MAX_SIDE_PX = 2048
 
 
 @dataclass
@@ -69,6 +92,47 @@ class ImageHandler:
                 "has_caption": caption is not None,
             },
         )
+
+    def is_image_document(self, document: Document) -> bool:
+        """Check whether a file sent as a document is an image we can pass to Claude"""
+        if document.mime_type and document.mime_type.startswith("image/"):
+            return document.mime_type != "image/svg+xml"
+        ext = Path(document.file_name or "").suffix.lower()
+        return ext in DOCUMENT_IMAGE_EXTENSIONS
+
+    async def process_document_image(
+        self, document: Document, caption: Optional[str] = None
+    ) -> ProcessedImage:
+        """Process an image sent as a file, converting HEIC/TIFF/etc. to JPEG"""
+        file = await document.get_file()
+        image_bytes = bytes(await file.download_as_bytearray())
+
+        source_format = self._detect_format(image_bytes)
+        if source_format not in NATIVE_FORMATS or len(image_bytes) > MAX_NATIVE_BYTES:
+            image_bytes = self._convert_to_jpeg(image_bytes)
+
+        return ProcessedImage(
+            prompt=self._create_generic_prompt(caption),
+            image_type="photo",
+            base64_data=base64.b64encode(image_bytes).decode("utf-8"),
+            size=len(image_bytes),
+            metadata={
+                "format": self._detect_format(image_bytes),
+                "source_format": source_format,
+                "filename": document.file_name,
+                "has_caption": caption is not None,
+            },
+        )
+
+    def _convert_to_jpeg(self, image_bytes: bytes) -> bytes:
+        """Decode any Pillow/HEIF-readable image and re-encode as a bounded JPEG"""
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = ImageOps.exif_transpose(img)
+            img = img.convert("RGB")
+            img.thumbnail((MAX_SIDE_PX, MAX_SIDE_PX))
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=85, optimize=True)
+        return out.getvalue()
 
     def _detect_image_type(self, image_bytes: bytes) -> str:
         """Detect type of image"""
