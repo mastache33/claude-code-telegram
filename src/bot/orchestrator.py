@@ -1412,6 +1412,7 @@ class MessageOrchestrator:
         # Stop and the work log stay hidden unless /verbose 1 or 2.
         interrupt_event = asyncio.Event()
         progress_msg = None
+        stop_kb = None
         if not quiet:
             stop_kb = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("Stop", callback_data=f"stop:{user_id}")]]
