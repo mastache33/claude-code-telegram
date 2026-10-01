@@ -2816,10 +2816,14 @@ class MessageOrchestrator:
         spoken = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", spoken).strip()[:limit]
         if not spoken:
             return
+        from .voice_stress import stress_russian
+
         if self.settings.tts_provider == "elevenlabs":
             await self._speak_elevenlabs(update, spoken)
             return
-        if self.settings.tts_provider == "mac" and await self._speak_mac(update, spoken):
+        if self.settings.tts_provider == "mac" and await self._speak_mac(
+            update, stress_russian(spoken)
+        ):
             return
 
         api_key = self.settings.openai_api_key
