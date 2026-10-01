@@ -1181,6 +1181,7 @@ class MessageOrchestrator:
                         await update.message.chat.send_media_group(
                             media=media,
                             reply_to_message_id=reply_to_message_id,
+                            message_thread_id=update.message.message_thread_id,
                         )
                         caption_sent = use_caption
                     finally:
