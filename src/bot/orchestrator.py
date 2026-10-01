@@ -1063,7 +1063,7 @@ class MessageOrchestrator:
                         tool_log.append(
                             {"kind": "tool", "name": name, "detail": detail}
                         )
-                    if draft_streamer:
+                    if draft_streamer and verbose_level >= 1:
                         icon = _tool_icon(name)
                         line = (
                             f"{icon} {name}: {detail}" if detail else f"{icon} {name}"
@@ -1080,7 +1080,7 @@ class MessageOrchestrator:
                             tool_log.append(
                                 {"kind": "text", "detail": first_line[:120]}
                             )
-                        if draft_streamer:
+                        if draft_streamer and verbose_level >= 1:
                             await draft_streamer.append_tool(
                                 f"\U0001f4ac {first_line[:120]}"
                             )
@@ -1461,9 +1461,9 @@ class MessageOrchestrator:
         mcp_topics: List[Dict[str, Any]] = []
         mcp_rejected_files: List[str] = []
 
-        # Stream drafts (private chats only)
+        # Черновик с командами и кусками текста — это ход работы. В тихом режиме его нет.
         draft_streamer: Optional[DraftStreamer] = None
-        if self.settings.enable_stream_drafts and chat.type == "private":
+        if self.settings.enable_stream_drafts and not quiet and chat.type == "private":
             draft_streamer = DraftStreamer(
                 bot=context.bot,
                 chat_id=chat.id,
