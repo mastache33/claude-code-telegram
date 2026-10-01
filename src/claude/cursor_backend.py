@@ -14,7 +14,7 @@ import structlog
 
 from ..config.settings import Settings
 from .exceptions import ClaudeProcessError, ClaudeTimeoutError
-from .sdk_integration import TASK_COMPLETED_MSG, ClaudeResponse, StreamUpdate
+from .sdk_integration import ClaudeResponse, StreamUpdate
 
 logger = structlog.get_logger()
 
@@ -28,6 +28,22 @@ _QUIET_REPLY = (
     "Ссылку на товар присылай только если страница открылась и товар можно купить. "
     "Если товара нет или он закончился — ищи другой."
 )
+
+
+def _bridge_dropped(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(
+        mark in text
+        for mark in (
+            "readerror",
+            "connecterror",
+            "remoteprotocol",
+            "bridge request failed",
+            "connection reset",
+            "broken pipe",
+            "server disconnected",
+        )
+    )
 
 
 def bare_tool_name(name: str) -> str:
@@ -114,12 +130,18 @@ class CursorSDKManager:
         self._agents.pop(self._key(user_id, working_directory), None)
         self._save_agents()
 
-    async def shutdown(self) -> None:
+    async def _drop_client(self) -> None:
         client = self._client
         self._client = None
-        self._agents.clear()
         if client is not None:
-            await client.aclose()
+            try:
+                await client.aclose()
+            except Exception:
+                logger.debug("Cursor client close failed")
+
+    async def shutdown(self) -> None:
+        self._agents.clear()
+        await self._drop_client()
 
     async def execute_command(
         self,
@@ -150,87 +172,97 @@ class CursorSDKManager:
         key = self._key(user_id, working_directory)
         mcp_servers = self._mcp_servers()
         agent: Any = None
+        result: Any = None
+        tools_used: List[Dict[str, Any]] = []
+        num_turns = 0
+        cost = 0.0
 
-        try:
-            client = await self._get_client()
-            agent, created = await self._open_agent(
-                client, key, working_directory, api_key, mcp_servers
-            )
-            text = self._opening_prompt(prompt, working_directory) if created else prompt
-            text = _QUIET_REPLY + "\n\n" + text
-            run = await agent.send(
-                self._message(text, images), {"mcp_servers": mcp_servers}
-            )
-            tools_used: List[Dict[str, Any]] = []
-            seen_calls: set[str] = set()
-            num_turns = 0
-
-            async def _consume() -> Any:
-                nonlocal num_turns
-                async for event in run.messages():
-                    if getattr(event, "type", "") == "assistant":
-                        num_turns += 1
-                        await self._emit_assistant(event, stream_callback)
-                    elif getattr(event, "type", "") == "tool_call":
-                        await self._emit_tool(
-                            event, stream_callback, tools_used, seen_calls
-                        )
-                return await run.wait()
-
-            consume = asyncio.create_task(_consume())
-            watcher: Optional[asyncio.Task[None]] = None
-            if interrupt_event is not None:
-
-                async def _cancel_on_interrupt() -> None:
-                    await interrupt_event.wait()
-                    await run.cancel()
-
-                watcher = asyncio.create_task(_cancel_on_interrupt())
-
+        for attempt in (1, 2):
+            agent = None
             try:
-                result = await asyncio.wait_for(
-                    consume, timeout=self.config.claude_timeout_seconds
+                client = await self._get_client()
+                agent, created = await self._open_agent(
+                    client, key, working_directory, api_key, mcp_servers
                 )
-            except asyncio.TimeoutError:
-                consume.cancel()
-                try:
-                    await consume
-                except (asyncio.CancelledError, Exception):
-                    pass
-                try:
-                    await run.cancel()
-                except Exception:
-                    logger.debug("Cursor cancel after timeout failed")
-                raise ClaudeTimeoutError(
-                    f"Cursor timed out after {self.config.claude_timeout_seconds}s"
+                text = self._opening_prompt(prompt, working_directory) if created else prompt
+                text = _QUIET_REPLY + "\n\n" + text
+                run = await agent.send(
+                    self._message(text, images), {"mcp_servers": mcp_servers}
                 )
-            finally:
-                if watcher is not None:
-                    watcher.cancel()
+                tools_used = []
+                seen_calls: set[str] = set()
+                num_turns = 0
 
-            cost = await self._cost(agent)
-        except (ClaudeProcessError, ClaudeTimeoutError):
-            raise
-        except Exception as exc:
-            logger.error("Cursor agent failed", error=str(exc), user_id=user_id)
-            self._agents.pop(key, None)
-            self._save_agents()
-            raise ClaudeProcessError(f"Cursor не ответил: {exc}") from exc
-        finally:
-            if agent is not None:
+                async def _consume() -> Any:
+                    nonlocal num_turns
+                    async for event in run.messages():
+                        if getattr(event, "type", "") == "assistant":
+                            num_turns += 1
+                            await self._emit_assistant(event, stream_callback)
+                        elif getattr(event, "type", "") == "tool_call":
+                            await self._emit_tool(
+                                event, stream_callback, tools_used, seen_calls
+                            )
+                    return await run.wait()
+
+                consume = asyncio.create_task(_consume())
+                watcher: Optional[asyncio.Task[None]] = None
+                if interrupt_event is not None:
+
+                    async def _cancel_on_interrupt() -> None:
+                        await interrupt_event.wait()
+                        await run.cancel()
+
+                    watcher = asyncio.create_task(_cancel_on_interrupt())
+
                 try:
-                    await agent.close()
-                except Exception:
-                    logger.debug("Cursor agent close failed")
+                    result = await asyncio.wait_for(
+                        consume, timeout=self.config.claude_timeout_seconds
+                    )
+                except asyncio.TimeoutError:
+                    consume.cancel()
+                    try:
+                        await consume
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    try:
+                        await run.cancel()
+                    except Exception:
+                        logger.debug("Cursor cancel after timeout failed")
+                    raise ClaudeTimeoutError(
+                        f"Cursor timed out after {self.config.claude_timeout_seconds}s"
+                    )
+                finally:
+                    if watcher is not None:
+                        watcher.cancel()
+
+                cost = await self._cost(agent)
+                break
+            except (ClaudeProcessError, ClaudeTimeoutError):
+                raise
+            except Exception as exc:
+                self._agents.pop(key, None)
+                self._save_agents()
+                if attempt == 1 and _bridge_dropped(exc):
+                    logger.warning(
+                        "Cursor bridge dropped, retrying once",
+                        error=str(exc),
+                        user_id=user_id,
+                    )
+                    await self._drop_client()
+                    continue
+                logger.error("Cursor agent failed", error=str(exc), user_id=user_id)
+                raise ClaudeProcessError(f"Cursor не ответил: {exc}") from exc
+            finally:
+                if agent is not None:
+                    try:
+                        await agent.close()
+                    except Exception:
+                        logger.debug("Cursor agent close failed")
 
         content = (getattr(result, "result", "") or "").strip()
         if not content and tools_used:
-            names = list(
-                dict.fromkeys(tool["name"] for tool in tools_used if tool.get("name"))
-            )
-            content = TASK_COMPLETED_MSG.format(
-                tools_summary=", ".join(names) or "unknown"
-            )
+            content = "Готово."
 
         status = str(getattr(result, "status", "") or "")
         interrupted = status == "cancelled"

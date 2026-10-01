@@ -1044,3 +1044,42 @@ async def test_bot_suffixed_command_not_forwarded(agentic_settings, deps):
     ) as mock_claude:
         await orchestrator._handle_unknown_command(update, context)
         mock_claude.assert_not_called()
+
+
+async def test_quiet_reply_skips_working(agentic_settings, tmp_dir):
+    """A normal question returns the answer and does not post Working..."""
+    from src.claude.sdk_integration import ClaudeResponse
+
+    orchestrator = MessageOrchestrator(agentic_settings, {})
+    integration = AsyncMock()
+    integration.run_command = AsyncMock(
+        return_value=ClaudeResponse(
+            content="4",
+            session_id="s",
+            cost=0.0,
+            duration_ms=10,
+            num_turns=1,
+        )
+    )
+    message = AsyncMock()
+    message.message_id = 7
+    message.chat.id = 1
+    message.chat.send_action = AsyncMock()
+    message.reply_text = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=5),
+        message=message,
+        effective_chat=message.chat,
+        effective_message=message,
+    )
+    context = SimpleNamespace(
+        user_data={"current_directory": tmp_dir, "verbose_level": 0},
+        bot_data={"claude_integration": integration},
+        bot=AsyncMock(),
+    )
+
+    await orchestrator._process_agentic_text(update, context, "сколько будет 2+2")
+
+    texts = [call.args[0] for call in message.reply_text.await_args_list if call.args]
+    assert any("4" in text for text in texts)
+    assert all("Working" not in text for text in texts)

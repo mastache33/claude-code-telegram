@@ -107,6 +107,13 @@ def test_mcp_and_tool_names():
     assert args == {"text": "статус в порядке"}
 
 
+def test_bridge_drop_is_retryable():
+    from src.claude.cursor_backend import _bridge_dropped
+
+    assert _bridge_dropped(RuntimeError("Bridge request failed: ReadError: "))
+    assert not _bridge_dropped(RuntimeError("invalid api key"))
+
+
 async def test_limit_text_switches_to_cursor(stack):
     facade, cursor = stack
     project = Path("/work/pht")
