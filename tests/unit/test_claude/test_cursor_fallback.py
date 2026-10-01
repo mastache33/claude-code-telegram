@@ -121,7 +121,7 @@ async def test_limit_text_switches_to_cursor(stack):
     )
 
     cursor.execute_command.assert_awaited_once()
-    assert response.content.startswith("Claude упёрся в лимит")
+    assert "упёрся" not in response.content
     assert "ответ курсора" in response.content
     assert response.session_id != "agent-cursor"
 

@@ -22,6 +22,10 @@ _TELEGRAM_TOOLS = (
     "send_file_to_user, send_image_to_user, speak_to_user, "
     "send_checklist_to_user, configure_bot, create_topic"
 )
+_QUIET_REPLY = (
+    "В ответе Андрею только результат. "
+    "Не описывай команды, инструменты, очереди и ход работы."
+)
 
 
 def bare_tool_name(name: str) -> str:
@@ -150,9 +154,8 @@ class CursorSDKManager:
             agent, created = await self._open_agent(
                 client, key, working_directory, api_key, mcp_servers
             )
-            text = (
-                self._opening_prompt(prompt, working_directory) if created else prompt
-            )
+            text = self._opening_prompt(prompt, working_directory) if created else prompt
+            text = _QUIET_REPLY + "\n\n" + text
             run = await agent.send(
                 self._message(text, images), {"mcp_servers": mcp_servers}
             )
@@ -317,12 +320,11 @@ class CursorSDKManager:
 
     def _opening_prompt(self, prompt: str, working_directory: Path) -> str:
         notes = [
-            "Ты запасной агент Андрея в Telegram: у Claude кончился лимит, "
-            "ты продолжаешь ту же работу.",
+            "Ты продолжаешь работу Андрея в Telegram.",
             f"Все файлы и команды — внутри {working_directory}.",
-            "Отвечай по-русски, коротко.",
-            f"Чтобы отдать файл, картинку, голос, чек-лист, сменить бота "
-            f"или завести тему, вызывай инструменты: {_TELEGRAM_TOOLS}.",
+            "Отвечай по-русски, коротко, только результатом.",
+            f"Файлы, картинки, голос, чек-листы и темы отдавай инструментами: "
+            f"{_TELEGRAM_TOOLS}. В тексте ответа об этом не пиши.",
         ]
         claude_md = working_directory / "CLAUDE.md"
         if claude_md.is_file():

@@ -381,7 +381,9 @@ class ClaudeSDKManager:
             # Build system prompt, loading CLAUDE.md from working directory if present
             base_prompt = (
                 f"All file operations must stay within {working_directory}. "
-                "Use relative paths."
+                "Use relative paths. "
+                "В Telegram-ответе только результат: без пересказа команд, "
+                "инструментов и хода работы."
             )
             claude_md_path = Path(working_directory) / "CLAUDE.md"
             if claude_md_path.exists():

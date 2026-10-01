@@ -748,6 +748,28 @@ class MessageOrchestrator:
             return int(user_override)
         return self.settings.verbose_level
 
+    async def _note(
+        self,
+        update: Update,
+        progress_msg: Any,
+        text: str,
+        parse_mode: Optional[str] = None,
+    ) -> None:
+        """Show an error on the progress bubble, or as the reply when the bubble is hidden."""
+        if progress_msg is not None:
+            await progress_msg.edit_text(text, parse_mode=parse_mode, reply_markup=None)
+            return
+        if update.message:
+            await update.message.reply_text(text, parse_mode=parse_mode)
+
+    async def _drop_progress(self, progress_msg: Any) -> None:
+        if progress_msg is None:
+            return
+        try:
+            await progress_msg.delete()
+        except Exception:
+            logger.debug("Failed to delete progress message, ignoring")
+
     async def agentic_verbose(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1070,7 +1092,7 @@ class MessageOrchestrator:
                     await draft_streamer.append_text(update_obj.content)
 
             # Throttle progress message edits to avoid Telegram rate limits
-            if not draft_streamer and verbose_level >= 1:
+            if not draft_streamer and verbose_level >= 1 and progress_msg is not None:
                 now = time.time()
                 if (now - last_edit_time[0]) >= 2.0 and tool_log:
                     last_edit_time[0] = now
@@ -1385,17 +1407,20 @@ class MessageOrchestrator:
         await chat.send_action("typing")
 
         verbose_level = self._get_verbose_level(context)
+        quiet = verbose_level == 0
 
-        # Create Stop button and interrupt event
+        # Stop and the work log stay hidden unless /verbose 1 or 2.
         interrupt_event = asyncio.Event()
-        stop_kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Stop", callback_data=f"stop:{user_id}")]]
-        )
-        progress_msg = await update.message.reply_text(
-            "Working...", reply_markup=stop_kb
-        )
-        await self._react(update.message, "👀")
-        await self._update_status(update, context, "⏳ работаю", message_text)
+        progress_msg = None
+        if not quiet:
+            stop_kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Stop", callback_data=f"stop:{user_id}")]]
+            )
+            progress_msg = await update.message.reply_text(
+                "Working...", reply_markup=stop_kb
+            )
+            await self._react(update.message, "👀")
+            await self._update_status(update, context, "⏳ работаю", message_text)
 
         # Register active request for stop callback
         active_request = ActiveRequest(
@@ -1408,9 +1433,10 @@ class MessageOrchestrator:
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
             self._active_requests.pop(user_id, None)
-            await progress_msg.edit_text(
+            await self._note(
+                update,
+                progress_msg,
                 "Claude integration not available. Check configuration.",
-                reply_markup=None,
             )
             return
 
@@ -1546,10 +1572,7 @@ class MessageOrchestrator:
                 except Exception:
                     logger.debug("Draft flush failed in finally block", user_id=user_id)
 
-        try:
-            await progress_msg.delete()
-        except Exception:
-            logger.debug("Failed to delete progress message, ignoring")
+        await self._drop_progress(progress_msg)
 
         # Use MCP-collected images and image paths mentioned in the agent text.
         images: List[ImageAttachment] = list(mcp_images)
@@ -1652,10 +1675,11 @@ class MessageOrchestrator:
                 update, context, claude_response.content, from_voice=False, requested=mcp_voice,
                 asked_for_voice=bool(VOICE_REQUEST_RE.search(message_text or "")),
             )
-        await self._react(update.message, "👍" if success else "🤔")
-        await self._update_status(
-            update, context, "✅ готов" if success else "⚠️ ошибка", message_text
-        )
+        if not quiet:
+            await self._react(update.message, "👍" if success else "🤔")
+            await self._update_status(
+                update, context, "✅ готов" if success else "⚠️ ошибка", message_text
+            )
 
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
@@ -1698,7 +1722,9 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
+        progress_msg = None
+        if self._get_verbose_level(context) >= 1:
+            progress_msg = await update.message.reply_text("Working...")
 
         # Try enhanced file handler, fall back to basic
         features = context.bot_data.get("features")
@@ -1729,16 +1755,16 @@ class MessageOrchestrator:
                     f"```\n{content}\n```"
                 )
             except UnicodeDecodeError:
-                await progress_msg.edit_text(
-                    "Unsupported file format. Must be text-based (UTF-8)."
+                await self._note(
+                    update, progress_msg, "Unsupported file format. Must be text-based (UTF-8)."
                 )
                 return
 
         # Process with Claude
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
-            await progress_msg.edit_text(
-                "Claude integration not available. Check configuration."
+            await self._note(
+                update, progress_msg, "Claude integration not available. Check configuration."
             )
             return
 
@@ -1796,10 +1822,7 @@ class MessageOrchestrator:
                 claude_response.content
             )
 
-            try:
-                await progress_msg.delete()
-            except Exception:
-                logger.debug("Failed to delete progress message, ignoring")
+            await self._drop_progress(progress_msg)
 
             # Use MCP-collected images (from send_image_to_user tool calls)
             images: List[ImageAttachment] = mcp_images_doc
@@ -1856,7 +1879,7 @@ class MessageOrchestrator:
         except Exception as e:
             from .handlers.message import _format_error_message
 
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
+            await self._note(update, progress_msg, _format_error_message(e), parse_mode="HTML")
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
         finally:
             heartbeat.cancel()
@@ -1937,7 +1960,9 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
+        progress_msg = None
+        if self._get_verbose_level(context) >= 1:
+            progress_msg = await update.message.reply_text("Working...")
 
         try:
             # First photo carries the caption so its prompt template is
@@ -1982,7 +2007,7 @@ class MessageOrchestrator:
         except Exception as e:
             from .handlers.message import _format_error_message
 
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
+            await self._note(update, progress_msg, _format_error_message(e), parse_mode="HTML")
             logger.error(
                 "Claude photo processing failed",
                 error=str(e),
@@ -2005,7 +2030,9 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Transcribing...")
+        progress_msg = None
+        if self._get_verbose_level(context) >= 1:
+            progress_msg = await update.message.reply_text("Transcribing...")
 
         try:
             voice = update.message.voice
@@ -2013,7 +2040,8 @@ class MessageOrchestrator:
                 voice, update.message.caption
             )
 
-            await progress_msg.edit_text("Working...")
+            if progress_msg is not None:
+                await progress_msg.edit_text("Working...")
             await self._handle_agentic_media_message(
                 update=update,
                 context=context,
@@ -2026,7 +2054,7 @@ class MessageOrchestrator:
         except Exception as e:
             from .handlers.message import _format_error_message
 
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
+            await self._note(update, progress_msg, _format_error_message(e), parse_mode="HTML")
             logger.error(
                 "Claude voice processing failed", error=str(e), user_id=user_id
             )
@@ -2047,7 +2075,9 @@ class MessageOrchestrator:
             + "\nЕсли он не уточнил задачу — скажи, что это за место, и предложи, чем помочь "
               "(погода, маршрут, что рядом)."
         )
-        progress_msg = await message.reply_text("📍 Смотрю место...")
+        progress_msg = None
+        if self._get_verbose_level(context) >= 1:
+            progress_msg = await message.reply_text("📍 Смотрю место...")
         await self._handle_agentic_media_message(
             update=update,
             context=context,
@@ -2079,8 +2109,8 @@ class MessageOrchestrator:
         """Run a media-derived prompt through Claude and send responses."""
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
-            await progress_msg.edit_text(
-                "Claude integration not available. Check configuration."
+            await self._note(
+                update, progress_msg, "Claude integration not available. Check configuration."
             )
             return
 
@@ -2144,10 +2174,7 @@ class MessageOrchestrator:
         formatter = ResponseFormatter(self.settings)
         formatted_messages = formatter.format_claude_response(claude_response.content)
 
-        try:
-            await progress_msg.delete()
-        except Exception:
-            logger.debug("Failed to delete progress message, ignoring")
+        await self._drop_progress(progress_msg)
 
         # Use MCP-collected images (from send_image_to_user tool calls).
         images: List[ImageAttachment] = mcp_images_media
@@ -2542,7 +2569,9 @@ class MessageOrchestrator:
             return
         label = str(payload.get("label") or prompt)[:60]
         logger.info("Mini App action", action=payload.get("action"), user_id=update.effective_user.id)
-        progress_msg = await update.message.reply_text(f"🛠 {label}...")
+        progress_msg = None
+        if self._get_verbose_level(context) >= 1:
+            progress_msg = await update.message.reply_text(f"🛠 {label}...")
         await self._handle_agentic_media_message(
             update=update, context=context, prompt=prompt, progress_msg=progress_msg,
             user_id=update.effective_user.id, chat=update.effective_chat,
@@ -2677,7 +2706,9 @@ class MessageOrchestrator:
                 effective_chat=query.message.chat,
                 effective_message=query.message,
             )
-            progress_msg = await query.message.reply_text("Смотрю чек-лист...")
+            progress_msg = None
+            if self._get_verbose_level(context) >= 1:
+                progress_msg = await query.message.reply_text("Смотрю чек-лист...")
             await self._handle_agentic_media_message(
                 update=proxy, context=context, prompt=prompt, progress_msg=progress_msg,
                 user_id=state.user_id, chat=query.message.chat,

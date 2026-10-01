@@ -394,15 +394,6 @@ class ClaudeIntegration:
         self._cursor_until[key] = datetime.now(UTC) + timedelta(
             hours=self.config.cursor_fallback_hours
         )
-        if announce and on_stream is not None:
-            await _maybe_stream(
-                on_stream,
-                StreamUpdate(
-                    type="assistant",
-                    content="Claude упёрся в лимит, подключаю Cursor.",
-                ),
-            )
-
         kept_session_id = ""
         if session.session_id and not getattr(session, "is_new_session", False):
             kept_session_id = session.session_id
@@ -415,11 +406,6 @@ class ClaudeIntegration:
             interrupt_event=interrupt_event,
             images=images,
         )
-        if announce and response.content:
-            response.content = (
-                "Claude упёрся в лимит — дальше этот чат ведёт Cursor.\n\n"
-                + response.content
-            )
         response.session_id = kept_session_id
         logger.info(
             "Cursor fallback completed",
