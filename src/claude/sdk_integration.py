@@ -383,7 +383,10 @@ class ClaudeSDKManager:
                 f"All file operations must stay within {working_directory}. "
                 "Use relative paths. "
                 "В Telegram-ответе только результат: без пересказа команд, "
-                "инструментов и хода работы."
+                "инструментов и хода работы. "
+                "Встречи и напоминания записывай инструментом remind_user "
+                "(время Тюмени, 2026-10-02T15:43:00+05:00), не в файл. "
+                "Список — list_reminders, отмена — cancel_reminder."
             )
             claude_md_path = Path(working_directory) / "CLAUDE.md"
             if claude_md_path.exists():

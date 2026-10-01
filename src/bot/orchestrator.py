@@ -237,6 +237,9 @@ class MessageOrchestrator:
         """Wrap handler to inject dependencies into context.bot_data."""
 
         async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            from .reminders import write_chat_context
+
+            write_chat_context(update)
             self._bind_run_context(update, context)
             for key, value in self.deps.items():
                 context.bot_data[key] = value

@@ -108,7 +108,7 @@ class Settings(BaseSettings):
         description="Cursor key. A spent Claude limit then switches the chat to Cursor.",
     )
     cursor_model: str = Field(
-        "composer-2.5",
+        "grok-4.7",
         description="Cursor model id used while Claude's limit is spent",
     )
     cursor_fallback_enabled: bool = Field(

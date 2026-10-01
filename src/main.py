@@ -229,6 +229,7 @@ async def run_application(app: Dict[str, Any]) -> None:
 
     notification_service: Optional[NotificationService] = None
     scheduler: Optional[JobScheduler] = None
+    reminder_task: Optional[asyncio.Task] = None
     project_threads_manager: Optional[ProjectThreadManager] = None
 
     # Set up signal handlers for graceful shutdown
@@ -302,6 +303,11 @@ async def run_application(app: Dict[str, Any]) -> None:
         notification_service.register()
         await notification_service.start()
 
+        from src.bot.reminders import reminder_loop
+
+        reminder_task = asyncio.create_task(reminder_loop(telegram_bot))
+        logger.info("Reminder loop started")
+
         # Collect concurrent tasks
         tasks = []
 
@@ -365,6 +371,12 @@ async def run_application(app: Dict[str, Any]) -> None:
         logger.info("Shutting down application")
 
         try:
+            if reminder_task:
+                reminder_task.cancel()
+                try:
+                    await reminder_task
+                except asyncio.CancelledError:
+                    pass
             if scheduler:
                 await scheduler.stop()
             if notification_service:

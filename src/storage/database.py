@@ -310,6 +310,26 @@ class DatabaseManager:
                     ON project_threads(project_slug);
                 """,
             ),
+            (
+                5,
+                """
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    message_thread_id INTEGER,
+                    text TEXT NOT NULL,
+                    fire_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    sent_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_reminders_due
+                    ON reminders(status, fire_at);
+                """,
+            ),
         ]
 
     async def _init_pool(self):

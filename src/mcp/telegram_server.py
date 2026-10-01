@@ -211,5 +211,54 @@ async def send_image_to_user(file_path: str, caption: str = "") -> str:
     return f"Image queued for delivery: {path.name}"
 
 
+def _reminder_api():
+    import sys
+
+    root = str(Path(__file__).resolve().parents[2])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from src.bot import reminders
+
+    return reminders
+
+
+@mcp.tool()
+async def remind_user(when: str, text: str) -> str:
+    """Save a reminder and have the bot message Andrey at that time.
+
+    Use for meetings and for anything he asks to be reminded about.
+    Do not write reminders into notes or checklists.
+
+    Args:
+        when: Tyumen time. Prefer 2026-10-02T15:43:00+05:00.
+            Also accepted: "завтра 15:43", "сегодня 18:30", "через 30 минут".
+        text: What to say when the time comes, in Russian, under 400 characters.
+
+    Returns:
+        The saved time, or an error the model should fix and retry.
+    """
+    return _reminder_api().add_reminder(when, text)
+
+
+@mcp.tool()
+async def list_reminders() -> str:
+    """List reminders that have not fired yet.
+
+    Use when Andrey asks what is planned, what meetings he has, or what
+    he asked to be reminded about.
+    """
+    return _reminder_api().list_reminders()
+
+
+@mcp.tool()
+async def cancel_reminder(what: str) -> str:
+    """Cancel a pending reminder by its number or by a piece of its text.
+
+    Args:
+        what: Reminder number from list_reminders, or words from its text.
+    """
+    return _reminder_api().cancel_reminder(what)
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")
