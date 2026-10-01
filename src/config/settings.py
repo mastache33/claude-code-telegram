@@ -103,6 +103,24 @@ class Settings(BaseSettings):
     claude_model: Optional[str] = Field(
         None, description="Claude model to use (defaults to CLI default if unset)"
     )
+    cursor_api_key: Optional[SecretStr] = Field(
+        None,
+        description="Cursor key. A spent Claude limit then switches the chat to Cursor.",
+    )
+    cursor_model: str = Field(
+        "composer-2.5",
+        description="Cursor model id used while Claude's limit is spent",
+    )
+    cursor_fallback_enabled: bool = Field(
+        True,
+        description="Use Cursor when Claude reports that its usage limit is spent",
+    )
+    cursor_fallback_hours: int = Field(
+        6,
+        ge=1,
+        le=168,
+        description="Hours to keep answering with Cursor before trying Claude again",
+    )
     claude_max_turns: int = Field(
         DEFAULT_CLAUDE_MAX_TURNS, description="Max conversation turns"
     )
@@ -419,8 +437,12 @@ class Settings(BaseSettings):
         "~/.local/bin/say-lena-f5",
         description="Command on the Mac that takes text and an output path and prints the wav path",
     )
-    elevenlabs_api_key: Optional[SecretStr] = Field(None, description="ElevenLabs API key")
-    elevenlabs_voice_id: Optional[str] = Field(None, description="ElevenLabs voice id to speak with")
+    elevenlabs_api_key: Optional[SecretStr] = Field(
+        None, description="ElevenLabs API key"
+    )
+    elevenlabs_voice_id: Optional[str] = Field(
+        None, description="ElevenLabs voice id to speak with"
+    )
     elevenlabs_model: str = Field("eleven_v3", description="ElevenLabs TTS model")
     webapp_url: Optional[str] = Field(
         None,
@@ -649,6 +671,19 @@ class Settings(BaseSettings):
             if self.anthropic_api_key
             else None
         )
+
+    @property
+    def cursor_api_key_str(self) -> Optional[str]:
+        """Get Cursor API key as string."""
+        if not self.cursor_api_key:
+            return None
+        value = self.cursor_api_key.get_secret_value().strip()
+        return value or None
+
+    @property
+    def cursor_fallback_ready(self) -> bool:
+        """True when a spent Claude limit should be answered by Cursor."""
+        return bool(self.cursor_fallback_enabled and self.cursor_api_key_str)
 
     @property
     def mistral_api_key_str(self) -> Optional[str]:
