@@ -1590,6 +1590,9 @@ class MessageOrchestrator:
 
         # Try to combine text + images in one message when possible
         caption_sent = False
+        if mcp_checklists:
+            for message in formatted_messages:
+                message.text = self._without_checklist_echo(message.text or "", mcp_checklists)
         if images and len(formatted_messages) == 1:
             msg = formatted_messages[0]
             if msg.text and len(msg.text) <= 1024:
@@ -2180,6 +2183,12 @@ class MessageOrchestrator:
         # Use MCP-collected images (from send_image_to_user tool calls).
         images: List[ImageAttachment] = mcp_images_media
 
+        if mcp_checklists_media:
+            for message in formatted_messages:
+                message.text = self._without_checklist_echo(
+                    message.text or "", mcp_checklists_media
+                )
+
         caption_sent = False
         if images and len(formatted_messages) == 1:
             msg = formatted_messages[0]
@@ -2660,12 +2669,30 @@ class MessageOrchestrator:
     @staticmethod
     def _checklist_text(state: Checklist) -> str:
         done = sum(state.done)
-        lines = [f"📋 <b>{escape_html(state.title)}</b> — {done}/{len(state.items)}"]
-        lines += [
-            f"{'✅' if ok else '⬜️'} <s>{escape_html(item)}</s>" if ok else f"⬜️ {escape_html(item)}"
-            for item, ok in zip(state.items, state.done)
-        ]
-        return "\n".join(lines)
+        return f"📋 <b>{escape_html(state.title)}</b> — {done}/{len(state.items)}"
+
+    @staticmethod
+    def _without_checklist_echo(text: str, checklists: List[Any]) -> str:
+        """Drop lines that repeat a checklist the buttons already show."""
+        if not text or not checklists:
+            return text
+        blobs: List[str] = []
+        for title, items in checklists:
+            blobs.append(str(title))
+            blobs.extend(str(item) for item in items)
+
+        def norm(value: str) -> str:
+            return re.sub(r"[^0-9a-zа-яё]+", "", value.lower())
+
+        known = [norm(blob) for blob in blobs]
+        known = [item for item in known if len(item) > 8]
+        kept: List[str] = []
+        for line in text.splitlines():
+            folded = norm(re.sub(r"<[^>]+>", "", line))
+            if folded and any(folded in item or item in folded for item in known):
+                continue
+            kept.append(line)
+        return "\n".join(kept).strip()
 
     @staticmethod
     def _checklist_keyboard(message_id: int, state: Checklist) -> InlineKeyboardMarkup:

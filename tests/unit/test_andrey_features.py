@@ -256,7 +256,9 @@ async def test_checklist_toggle_and_report():
     update.callback_query.edit_message_text = AsyncMock()
     await orch._handle_checklist_callback(update, MagicMock())
     assert state.done == [True, False]
-    assert "✅" in orch._checklist_text(state) and "1/2" in orch._checklist_text(state)
+    text = orch._checklist_text(state)
+    assert "1/2" in text and "Выкат" in text
+    assert "тесты" not in text and "деплой" not in text
 
     update.callback_query.data = "chk:55:report"
     update.callback_query.message.reply_text = AsyncMock()
