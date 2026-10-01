@@ -33,6 +33,37 @@ def bare_tool_name(name: str) -> str:
     return cleaned
 
 
+def unwrap_cursor_tool(name: str, raw: Any) -> Tuple[str, Dict[str, Any]]:
+    """Turn Cursor's ``mcp`` wrapper into the tool the Telegram bot intercepts.
+
+    A speak request arrives as name ``mcp`` with
+    ``{toolName: speak_to_user, args: {text: ...}}``. The bot only delivers
+    voice, files and settings when it sees the inner name and arguments.
+    """
+    payload = raw if isinstance(raw, dict) else {}
+    if isinstance(raw, str):
+        try:
+            loaded = json.loads(raw)
+        except json.JSONDecodeError:
+            loaded = None
+        if isinstance(loaded, dict):
+            payload = loaded
+    inner = payload.get("toolName") or payload.get("tool_name")
+    if name in {"mcp", "CallDynamicTool"} and isinstance(inner, str) and inner.strip():
+        args = payload.get("args")
+        if args is None:
+            args = payload.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
+        return inner.strip(), args
+    return bare_tool_name(name), payload
+
+
 def claude_mcp_to_cursor(servers: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Convert a Claude ``mcpServers`` map into Cursor SDK server dicts."""
     converted: Dict[str, Dict[str, Any]] = {}
@@ -344,8 +375,9 @@ class CursorSDKManager:
             return
         if call_id:
             seen_calls.add(call_id)
-        name = bare_tool_name(str(getattr(event, "name", "") or ""))
-        tool_input = args if isinstance(args, dict) else {}
+        name, tool_input = unwrap_cursor_tool(
+            str(getattr(event, "name", "") or ""), args
+        )
         tools_used.append(
             {
                 "name": name,

@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import SecretStr
 
-from src.claude.cursor_backend import bare_tool_name, claude_mcp_to_cursor
+from src.claude.cursor_backend import (
+    bare_tool_name,
+    claude_mcp_to_cursor,
+    unwrap_cursor_tool,
+)
 from src.claude.exceptions import ClaudeProcessError
 from src.claude.facade import ClaudeIntegration
 from src.claude.limits import is_claude_limit
@@ -91,6 +95,16 @@ def test_mcp_and_tool_names():
     assert converted["telegram"]["env"] == {"A": "1"}
     assert converted["web"]["url"] == "https://example.test/mcp"
     assert bare_tool_name("mcp__telegram__send_file_to_user") == "send_file_to_user"
+    name, args = unwrap_cursor_tool(
+        "mcp",
+        {
+            "providerIdentifier": "telegram",
+            "toolName": "speak_to_user",
+            "args": {"text": "статус в порядке"},
+        },
+    )
+    assert name == "speak_to_user"
+    assert args == {"text": "статус в порядке"}
 
 
 async def test_limit_text_switches_to_cursor(stack):

@@ -2724,27 +2724,33 @@ class MessageOrchestrator:
         asked_for_voice: bool = False,
     ) -> None:
         """Speak the reply: on explicit ``speak_to_user`` calls, a voice request, or /voice mode."""
-        if requested:
-            for chunk in requested[:3]:
+        mode = context.user_data.get("voice_reply", "auto")
+        chunks = [chunk for chunk in (requested or []) if chunk and chunk.strip()]
+        logger.info(
+            "Voice reply decision",
+            asked=asked_for_voice,
+            from_voice=from_voice,
+            requested=len(chunks),
+            mode=mode,
+            has_key=self.settings.openai_api_key is not None,
+            tts=self.settings.tts_provider,
+        )
+        if chunks:
+            for chunk in chunks[:3]:
                 await self._speak(update, chunk)
             return
-        mode = context.user_data.get("voice_reply", "auto")
         if mode == "off" and not asked_for_voice:
             return
         if mode == "auto" and not from_voice and not asked_for_voice:
             return
         if not text or not text.strip():
             return
-        api_key = self.settings.openai_api_key
-        if api_key is None:
+        if self.settings.openai_api_key is None and self.settings.tts_provider != "mac":
             return
         await self._speak(update, text)
 
     async def _speak(self, update: Update, text: str) -> None:
         """Synthesise *text* with OpenAI TTS and send it as a Telegram voice message."""
-        api_key = self.settings.openai_api_key
-        if api_key is None:
-            return
         spoken = re.sub(r"```.*?```", " (код в тексте) ", text, flags=re.S)
         spoken = re.sub(r"[*_`#>|]", "", spoken)
         limit = 900 if self.settings.tts_provider == "mac" else 3500
@@ -2755,6 +2761,11 @@ class MessageOrchestrator:
             await self._speak_elevenlabs(update, spoken)
             return
         if self.settings.tts_provider == "mac" and await self._speak_mac(update, spoken):
+            return
+
+        api_key = self.settings.openai_api_key
+        if api_key is None:
+            logger.warning("Voice reply skipped, no OpenAI key and Mac voice did not answer")
             return
 
         try:
@@ -2802,6 +2813,7 @@ class MessageOrchestrator:
             )
             await asyncio.wait_for(fetch.communicate(), timeout=120)
             if fetch.returncode != 0 or not local_wav.is_file():
+                logger.info("Mac voice file was not copied", host=host)
                 return False
 
             convert = await asyncio.create_subprocess_exec(
