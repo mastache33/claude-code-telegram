@@ -916,25 +916,33 @@ class MessageOrchestrator:
         return ""
 
     @staticmethod
+    async def _show_typing(chat: Any, message_thread_id: Optional[int] = None) -> None:
+        """Show «печатает» in the same topic. Does not reveal what the bot is doing."""
+        kwargs: Dict[str, Any] = {}
+        if message_thread_id:
+            kwargs["message_thread_id"] = message_thread_id
+        try:
+            await chat.send_action("typing", **kwargs)
+        except Exception:
+            pass
+
+    @staticmethod
     def _start_typing_heartbeat(
         chat: Any,
-        interval: float = 2.0,
+        message_thread_id: Optional[int] = None,
+        interval: float = 4.0,
     ) -> "asyncio.Task[None]":
-        """Start a background typing indicator task.
+        """Keep «печатает» visible until the reply is sent.
 
-        Sends typing every *interval* seconds, independently of
-        stream events. Cancel the returned task in a ``finally``
-        block.
+        Telegram drops the indicator after about 5 seconds, so it is refreshed.
+        Cancel the returned task in a ``finally`` block.
         """
 
         async def _heartbeat() -> None:
             try:
                 while True:
+                    await MessageOrchestrator._show_typing(chat, message_thread_id)
                     await asyncio.sleep(interval)
-                    try:
-                        await chat.send_action("typing")
-                    except Exception:
-                        pass
             except asyncio.CancelledError:
                 pass
 
@@ -1407,7 +1415,8 @@ class MessageOrchestrator:
         """
         user_id = update.effective_user.id
         chat = update.message.chat
-        await chat.send_action("typing")
+        thread_id = update.message.message_thread_id
+        await self._show_typing(chat, thread_id)
 
         verbose_level = self._get_verbose_level(context)
         quiet = verbose_level == 0
@@ -1494,7 +1503,7 @@ class MessageOrchestrator:
         )
 
         # Independent typing heartbeat — stays alive even with no stream events
-        heartbeat = self._start_typing_heartbeat(chat)
+        heartbeat = self._start_typing_heartbeat(chat, thread_id)
 
         approval_cb = None
         if self.settings.interactive_tool_approval:
@@ -1728,7 +1737,8 @@ class MessageOrchestrator:
             return
 
         chat = update.message.chat
-        await chat.send_action("typing")
+        thread_id = update.message.message_thread_id
+        await self._show_typing(chat, thread_id)
         progress_msg = None
         if self._get_verbose_level(context) >= 1:
             progress_msg = await update.message.reply_text("Working...")
@@ -1800,7 +1810,7 @@ class MessageOrchestrator:
             approved_directory=self.settings.approved_directory,
         )
 
-        heartbeat = self._start_typing_heartbeat(chat)
+        heartbeat = self._start_typing_heartbeat(chat, thread_id)
         try:
             claude_response = await claude_integration.run_command(
                 prompt=prompt,
@@ -1966,7 +1976,8 @@ class MessageOrchestrator:
             return
 
         chat = update.message.chat
-        await chat.send_action("typing")
+        thread_id = update.message.message_thread_id
+        await self._show_typing(chat, thread_id)
         progress_msg = None
         if self._get_verbose_level(context) >= 1:
             progress_msg = await update.message.reply_text("Working...")
@@ -2036,7 +2047,8 @@ class MessageOrchestrator:
             return
 
         chat = update.message.chat
-        await chat.send_action("typing")
+        thread_id = update.message.message_thread_id
+        await self._show_typing(chat, thread_id)
         progress_msg = None
         if self._get_verbose_level(context) >= 1:
             progress_msg = await update.message.reply_text("Transcribing...")
@@ -2151,7 +2163,8 @@ class MessageOrchestrator:
             approved_directory=self.settings.approved_directory,
         )
 
-        heartbeat = self._start_typing_heartbeat(chat)
+        media_thread = update.message.message_thread_id if update.message else None
+        heartbeat = self._start_typing_heartbeat(chat, media_thread)
         try:
             claude_response = await claude_integration.run_command(
                 prompt=prompt,
